@@ -27,10 +27,10 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Setup Gradle 8.13
+      - name: Setup Gradle 9.6.0
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: '8.13'
+          gradle-version: '9.6.0'
 
       - name: Build debug APK
         run: gradle :app:assembleDebug --stacktrace
