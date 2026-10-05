@@ -2,11 +2,11 @@ package com.livetv.premium
 
 import android.app.Activity
 import android.os.Bundle
+import androidx.activity.BackHandler
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
@@ -15,12 +15,10 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.focusable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.*
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
@@ -33,38 +31,20 @@ import androidx.compose.ui.draw.scale
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.input.key.KeyEventType
-import androidx.compose.ui.input.key.key
-import androidx.compose.ui.input.key.onPreviewKeyEvent
-import androidx.compose.ui.input.key.type
-import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.*
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
 import coil3.compose.AsyncImage
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import org.json.JSONArray
-import org.json.JSONObject
-import java.net.HttpURLConnection
-import java.net.URL
 import java.util.Locale
-
-data class Channel(
-    val id: String,
-    val name: String,
-    val url: String,
-    val logo: String,
-    val category: String
-)
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -83,155 +63,97 @@ private fun LiveTvApp() {
     var error by remember { mutableStateOf<String?>(null) }
     var selected by remember { mutableStateOf<Channel?>(null) }
     var showExit by remember { mutableStateOf(false) }
+    var showSettings by remember { mutableStateOf(false) }
 
     suspend fun loadPlaylist() {
-        loading = true
-        error = null
+        loading = true; error = null
         try {
             val result = PlaylistRepository.load(context)
-            if (result.isNotEmpty()) channels = result
-            else if (channels.isEmpty()) error = "No channels found in playlist."
+            if (result.isNotEmpty()) channels = result else if (channels.isEmpty()) error = "No channels found."
         } catch (e: Exception) {
             if (channels.isEmpty()) error = e.message ?: "Unable to load playlist."
-        } finally {
-            loading = false
+        } finally { loading = false }
+    }
+
+    LaunchedEffect(Unit) { loadPlaylist() }
+    BackHandler(enabled = selected != null) { selected = null }
+    BackHandler(enabled = selected == null && !showSettings) { showExit = true }
+
+    MaterialTheme(colorScheme = darkColorScheme(
+        background = Color(0xFF06080D), surface = Color(0xFF10151F), surfaceVariant = Color(0xFF181F2B), primary = Color.White
+    )) {
+        AnimatedContent(targetState = selected, transitionSpec = { fadeIn(tween(180)) togetherWith fadeOut(tween(130)) }, label = "screen") { channel ->
+            if (channel == null) HomeScreen(channels, loading, error, { scope.launch { loadPlaylist() } }, { selected = it }, { showSettings = true })
+            else PlayerScreen(channel, channels, onBack = { selected = null }, onChannel = { selected = it })
         }
-    }
 
-    LaunchedEffect(Unit) {
-        loadPlaylist()
-    }
-
-    BackHandler(enabled = selected != null) {
-        selected = null
-    }
-
-    BackHandler(enabled = selected == null) {
-        showExit = true
-    }
-
-    MaterialTheme(
-        colorScheme = darkColorScheme(
-            background = Color(0xFF07090D),
-            surface = Color(0xFF10141C),
-            primary = Color.White
+        if (showSettings) SettingsDialog(loading, { scope.launch { loadPlaylist() } }, { showSettings = false })
+        if (showExit) AlertDialog(
+            onDismissRequest = { showExit = false },
+            title = { Text("Exit Live TV?") }, text = { Text("Are you sure you want to close the app?") },
+            confirmButton = { TextButton(onClick = { activity.finish() }) { Text("Exit") } },
+            dismissButton = { TextButton(onClick = { showExit = false }) { Text("Cancel") } }
         )
-    ) {
-        AnimatedContent(
-            targetState = selected,
-            transitionSpec = { fadeIn(tween(220)) togetherWith fadeOut(tween(180)) },
-            label = "screen"
-        ) { channel ->
-            if (channel == null) {
-                HomeScreen(
-                    channels = channels,
-                    loading = loading,
-                    error = error,
-                    onRetry = { scope.launch { loadPlaylist() } },
-                    onChannel = { selected = it }
-                )
-            } else {
-                PlayerScreen(
-                    channel = channel,
-                    onPrevious = {
-                        val index = channels.indexOfFirst { it.id == channel.id }
-                        if (index > 0) selected = channels[index - 1]
-                    },
-                    onNext = {
-                        val index = channels.indexOfFirst { it.id == channel.id }
-                        if (index >= 0 && index < channels.lastIndex) selected = channels[index + 1]
-                    }
-                )
-            }
-        }
-
-        if (showExit) {
-            AlertDialog(
-                onDismissRequest = { showExit = false },
-                title = { Text("Exit Live TV?") },
-                text = { Text("Are you sure you want to close the app?") },
-                confirmButton = {
-                    TextButton(onClick = { activity.finish() }) { Text("Exit") }
-                },
-                dismissButton = {
-                    TextButton(onClick = { showExit = false }) { Text("Cancel") }
-                }
-            )
-        }
     }
 }
 
 @Composable
-private fun HomeScreen(
-    channels: List<Channel>,
-    loading: Boolean,
-    error: String?,
-    onRetry: () -> Unit,
-    onChannel: (Channel) -> Unit
-) {
-    val grouped = remember(channels) {
-        channels.groupBy { it.category.ifBlank { "Live TV" } }
-            .toSortedMap(String.CASE_INSENSITIVE_ORDER)
+private fun HomeScreen(channels: List<Channel>, loading: Boolean, error: String?, onRetry: () -> Unit, onChannel: (Channel) -> Unit, onSettings: () -> Unit) {
+    var query by remember { mutableStateOf("") }
+    var selectedCategory by remember { mutableStateOf("All") }
+    val categories = remember(channels) { listOf("All") + channels.map { it.category.ifBlank { "Live TV" } }.distinct().sorted() }
+    val filtered = remember(channels, query, selectedCategory) {
+        channels.filter { c ->
+            (selectedCategory == "All" || c.category.ifBlank { "Live TV" } == selectedCategory) &&
+                (query.isBlank() || c.name.contains(query, true) || c.category.contains(query, true))
+        }
     }
+    val grouped = remember(filtered) { filtered.groupBy { it.category.ifBlank { "Live TV" } }.toSortedMap(String.CASE_INSENSITIVE_ORDER) }
 
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(
-                Brush.verticalGradient(
-                    listOf(Color(0xFF0A0D13), Color(0xFF050609))
-                )
-            )
-    ) {
-        Column(Modifier.fillMaxSize().padding(horizontal = 52.dp, vertical = 28.dp)) {
-            Row(
-                Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Logo()
-                Spacer(Modifier.width(18.dp))
-                Column {
-                    Text(BrandConfig.APP_NAME, fontSize = 30.sp, fontWeight = FontWeight.Bold)
-                    Text(
-                        if (loading) "Loading live channels…" else "${channels.size} channels available",
-                        color = Color(0xFF9EA5B2),
-                        fontSize = 14.sp
-                    )
-                }
+    Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color(0xFF0B0F18), Color(0xFF05070B))))) {
+        Column(Modifier.fillMaxSize().padding(horizontal = 48.dp, vertical = 26.dp)) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Logo(); Spacer(Modifier.width(16.dp))
+                Column { Text(BrandConfig.APP_NAME, fontSize = 29.sp, fontWeight = FontWeight.ExtraBold); Text("Live channels • ${channels.size} available", color = Color(0xFF8993A3), fontSize = 13.sp) }
                 Spacer(Modifier.weight(1f))
-                Icon(Icons.Default.Search, null, tint = Color(0xFFB9C0CC), modifier = Modifier.size(30.dp))
+                FocusIconButton(Icons.Default.Settings, "Settings", onSettings)
             }
-
-            Spacer(Modifier.height(28.dp))
+            Spacer(Modifier.height(22.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                OutlinedTextField(
+                    value = query, onValueChange = { query = it }, singleLine = true,
+                    placeholder = { Text("Search channels…") }, leadingIcon = { Icon(Icons.Default.Search, null) },
+                    trailingIcon = { if (query.isNotEmpty()) IconButton({ query = "" }) { Icon(Icons.Default.Close, null) } },
+                    modifier = Modifier.width(430.dp).height(58.dp).focusable(), shape = RoundedCornerShape(18.dp),
+                    colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = Color.White, unfocusedBorderColor = Color(0xFF303848))
+                )
+                Spacer(Modifier.width(18.dp))
+                Text("${filtered.size} channels", color = Color(0xFF929AAA), fontSize = 14.sp)
+            }
+            Spacer(Modifier.height(17.dp))
+            Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(9.dp)) {
+                categories.forEach { category ->
+                    FilterChip(selected = selectedCategory == category, onClick = { selectedCategory = category }, label = { Text(category) })
+                }
+            }
+            Spacer(Modifier.height(18.dp))
 
             when {
                 loading && channels.isEmpty() -> LoadingRows()
                 error != null && channels.isEmpty() -> ErrorState(error, onRetry)
-                grouped.isEmpty() -> ErrorState("No channels available.", onRetry)
-                else -> {
-                    LazyColumn(
-                        state = rememberLazyListState(),
-                        verticalArrangement = Arrangement.spacedBy(26.dp),
-                        contentPadding = PaddingValues(bottom = 32.dp)
-                    ) {
-                        grouped.forEach { (category, list) ->
-                            item(key = "header_$category") {
-                                Text(
-                                    category,
-                                    fontSize = 23.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    modifier = Modifier.padding(start = 4.dp)
-                                )
+                filtered.isEmpty() -> ErrorState("No matching channels.") { query = ""; selectedCategory = "All" }
+                else -> LazyColumn(verticalArrangement = Arrangement.spacedBy(25.dp), contentPadding = PaddingValues(bottom = 34.dp)) {
+                    grouped.forEach { (category, list) ->
+                        item(key = "h_$category") {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Box(Modifier.width(4.dp).height(25.dp).clip(RoundedCornerShape(3.dp)).background(Color.White))
+                                Spacer(Modifier.width(10.dp)); Text(category, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                                Spacer(Modifier.width(9.dp)); Text("${list.size}", color = Color(0xFF778092), fontSize = 13.sp)
                             }
-                            item(key = "row_$category") {
-                                LazyRow(
-                                    horizontalArrangement = Arrangement.spacedBy(18.dp),
-                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp)
-                                ) {
-                                    itemsIndexed(list, key = { _, c -> c.id }) { _, channel ->
-                                        ChannelCard(channel, onChannel)
-                                    }
-                                }
+                        }
+                        item(key = "r_$category") {
+                            LazyRow(horizontalArrangement = Arrangement.spacedBy(16.dp), contentPadding = PaddingValues(horizontal = 5.dp, vertical = 8.dp)) {
+                                items(list, key = { it.id }) { ChannelCard(it, onChannel) }
                             }
                         }
                     }
@@ -244,182 +166,70 @@ private fun HomeScreen(
 @Composable
 private fun ChannelCard(channel: Channel, onClick: (Channel) -> Unit) {
     var focused by remember { mutableStateOf(false) }
-    val scale by animateFloatAsState(
-        targetValue = if (focused) 1.10f else 1f,
-        animationSpec = tween(150),
-        label = "focusScale"
-    )
-
-    Box(
-        modifier = Modifier
-            .width(210.dp)
-            .height(132.dp)
-            .scale(scale)
-            .clip(RoundedCornerShape(16.dp))
-            .background(Color(0xFF121722))
-            .then(
-                if (focused) Modifier.border(3.dp, Color.White, RoundedCornerShape(16.dp))
-                else Modifier.border(1.dp, Color(0xFF252C39), RoundedCornerShape(16.dp))
-            )
-            .onFocusChanged { focused = it.isFocused }
-            .focusable()
-            .onPreviewKeyEvent {
-                if (it.type == KeyEventType.KeyUp &&
-                    (it.key == Key.Enter || it.key == Key.DirectionCenter)
-                ) {
-                    onClick(channel)
-                    true
-                } else false
-            }
-            .padding(12.dp),
-        contentAlignment = Alignment.Center
-    ) {
-        if (channel.logo.isNotBlank()) {
-            AsyncImage(
-                model = channel.logo,
-                contentDescription = channel.name,
-                contentScale = ContentScale.Fit,
-                modifier = Modifier.fillMaxSize(0.62f)
-            )
-        } else {
-            Text(
-                channel.name,
-                fontSize = 20.sp,
-                fontWeight = FontWeight.Bold,
-                maxLines = 2
-            )
-        }
-
-        Box(
-            Modifier.align(Alignment.TopStart)
-                .clip(RoundedCornerShape(6.dp))
-                .background(Color(0xFFDA2C38))
-                .padding(horizontal = 7.dp, vertical = 3.dp)
-        ) {
-            Text("LIVE", fontSize = 10.sp, fontWeight = FontWeight.Bold)
-        }
-
-        Text(
-            channel.name,
-            fontSize = 12.sp,
-            maxLines = 1,
-            color = Color(0xFFE6E9EF),
-            modifier = Modifier.align(Alignment.BottomStart)
-        )
+    val scale by animateFloatAsState(if (focused) 1.06f else 1f, tween(140), label = "cardScale")
+    val borderColor by animateColorAsState(if (focused) Color.White else Color(0xFF252D3A), tween(120), label = "border")
+    Box(Modifier.width(208.dp).height(136.dp).scale(scale).clip(RoundedCornerShape(17.dp)).background(Color(0xFF121823)).border(if (focused) 2.5.dp else 1.dp, borderColor, RoundedCornerShape(17.dp)).onFocusChanged { focused = it.isFocused }.focusable().onPreviewKeyEvent {
+        if (it.type == KeyEventType.KeyUp && (it.key == Key.Enter || it.key == Key.DirectionCenter)) { onClick(channel); true } else false
+    }.padding(11.dp)) {
+        if (channel.logo.isNotBlank()) AsyncImage(channel.logo, channel.name, contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize(0.60f).align(Alignment.Center))
+        else Icon(Icons.Default.Tv, null, modifier = Modifier.size(50.dp).align(Alignment.Center), tint = Color(0xFF7D8798))
+        Box(Modifier.align(Alignment.TopStart).clip(RoundedCornerShape(6.dp)).background(Color(0xFFE3293D)).padding(horizontal = 6.dp, vertical = 3.dp)) { Text("LIVE", fontSize = 9.sp, fontWeight = FontWeight.Bold) }
+        if (channel.streams.size > 1) Text("${channel.streams.size} streams", color = Color(0xFFB8C0CE), fontSize = 9.sp, modifier = Modifier.align(Alignment.TopEnd))
+        Text(channel.name, fontSize = 12.sp, maxLines = 1, fontWeight = FontWeight.SemiBold, modifier = Modifier.align(Alignment.BottomStart))
     }
 }
 
 @Composable
-private fun PlayerScreen(
-    channel: Channel,
-    onPrevious: () -> Unit,
-    onNext: () -> Unit
-) {
+private fun PlayerScreen(channel: Channel, channels: List<Channel>, onBack: () -> Unit, onChannel: (Channel) -> Unit) {
     val context = LocalContext.current
-    val player = remember(channel.url) {
+    var streamIndex by remember(channel.id) { mutableIntStateOf(0) }
+    val streamUrl = channel.streams.getOrElse(streamIndex) { channel.url }
+    val player = remember(channel.id, streamUrl) {
         ExoPlayer.Builder(context).build().apply {
-            val itemBuilder = MediaItem.Builder().setUri(channel.url)
-            if (channel.url.lowercase(Locale.US).contains(".m3u8")) {
-                itemBuilder.setMimeType(MimeTypes.APPLICATION_M3U8)
-            }
-            setMediaItem(itemBuilder.build())
-            prepare()
-            playWhenReady = true
+            val builder = MediaItem.Builder().setUri(streamUrl)
+            if (streamUrl.lowercase(Locale.US).contains(".m3u8")) builder.setMimeType(MimeTypes.APPLICATION_M3U8)
+            setMediaItem(builder.build()); prepare(); playWhenReady = true
         }
     }
+    DisposableEffect(player) { onDispose { player.release() } }
+    fun move(delta: Int) { val i = channels.indexOfFirst { it.id == channel.id }; if (i >= 0) onChannel(channels[(i + delta + channels.size) % channels.size]) }
 
-    DisposableEffect(player) {
-        onDispose { player.release() }
-    }
-
-    Box(Modifier.fillMaxSize().background(Color.Black)) {
-        AndroidView(
-            factory = { ctx ->
-                PlayerView(ctx).apply {
-                    useController = true
-                    controllerAutoShow = true
-                    controllerHideOnTouch = true
-                    setPlayer(player)
-                    requestFocus()
-                }
-            },
-            modifier = Modifier
-                .fillMaxSize()
-                .focusable()
-                .onPreviewKeyEvent { event ->
-                    if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
-                    when (event.key) {
-                        Key.ChannelUp -> { onNext(); true }
-                        Key.ChannelDown -> { onPrevious(); true }
-                        else -> false
-                    }
-                }
-        )
-
-        Row(
-            Modifier
-                .align(Alignment.TopStart)
-                .padding(28.dp)
-                .clip(RoundedCornerShape(12.dp))
-                .background(Color(0x99070A0F))
-                .padding(horizontal = 16.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text("●", color = Color(0xFFFF3B45), fontSize = 14.sp)
-            Spacer(Modifier.width(8.dp))
-            Text(channel.name, fontWeight = FontWeight.Bold, fontSize = 18.sp)
+    Box(Modifier.fillMaxSize().background(Color.Black).onPreviewKeyEvent { e ->
+        if (e.type != KeyEventType.KeyDown) false else when (e.key) {
+            Key.DirectionLeft -> { move(-1); true }; Key.DirectionRight -> { move(1); true }
+            Key.DirectionUp, Key.ChannelUp -> { move(1); true }; Key.DirectionDown, Key.ChannelDown -> { move(-1); true }
+            Key.Escape, Key.Back -> { onBack(); true }; Key.MediaPlayPause -> { if (player.isPlaying) player.pause() else player.play(); true }
+            else -> false
         }
-    }
-}
-
-@Composable
-private fun Logo() {
-    if (BrandConfig.REMOTE_LOGO_URL.isNotBlank()) {
-        AsyncImage(
-            model = BrandConfig.REMOTE_LOGO_URL,
-            contentDescription = "Logo",
-            contentScale = ContentScale.Fit,
-            modifier = Modifier.size(58.dp).clip(RoundedCornerShape(14.dp))
-        )
-    } else {
-        Box(
-            Modifier.size(58.dp)
-                .clip(RoundedCornerShape(14.dp))
-                .background(Color.White),
-            contentAlignment = Alignment.Center
-        ) {
-            Icon(Icons.Default.Tv, null, tint = Color.Black, modifier = Modifier.size(34.dp))
+    }.focusable()) {
+        AndroidView(factory = { ctx -> PlayerView(ctx).apply { useController = true; controllerAutoShow = true; setPlayer(player); requestFocus() } }, modifier = Modifier.fillMaxSize())
+        Row(Modifier.align(Alignment.TopStart).padding(24.dp).clip(RoundedCornerShape(13.dp)).background(Color(0xCC070A10)).padding(horizontal = 15.dp, vertical = 9.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text("●", color = Color(0xFFFF3346)); Spacer(Modifier.width(7.dp)); Text(channel.name, fontWeight = FontWeight.Bold)
         }
-    }
-}
-
-@Composable
-private fun LoadingRows() {
-    Column(verticalArrangement = Arrangement.spacedBy(22.dp)) {
-        repeat(4) {
-            Row(horizontalArrangement = Arrangement.spacedBy(18.dp)) {
-                repeat(5) {
-                    Box(
-                        Modifier.width(210.dp).height(132.dp)
-                            .clip(RoundedCornerShape(16.dp))
-                            .background(Color(0xFF121722))
-                    )
+        if (channel.streams.size > 1) {
+            Row(Modifier.align(Alignment.BottomCenter).padding(bottom = 25.dp).clip(RoundedCornerShape(14.dp)).background(Color(0xDD0A0E15)).padding(8.dp), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                channel.streams.forEachIndexed { i, _ ->
+                    FilterChip(selected = i == streamIndex, onClick = { streamIndex = i }, label = { Text("Stream ${i + 1}") })
                 }
             }
         }
     }
 }
 
-@Composable
-private fun ErrorState(message: String, retry: () -> Unit) {
-    Column(
-        Modifier.fillMaxWidth().padding(top = 80.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        Icon(Icons.Default.CloudOff, null, modifier = Modifier.size(52.dp), tint = Color(0xFF9EA5B2))
-        Spacer(Modifier.height(16.dp))
-        Text(message, color = Color(0xFFB9C0CC), fontSize = 18.sp)
-        Spacer(Modifier.height(18.dp))
-        Button(onClick = retry) { Text("Retry") }
-    }
+@Composable private fun FocusIconButton(icon: androidx.compose.ui.graphics.vector.ImageVector, desc: String, onClick: () -> Unit) {
+    var focused by remember { mutableStateOf(false) }
+    IconButton(onClick = onClick, modifier = Modifier.size(50.dp).clip(RoundedCornerShape(14.dp)).background(if (focused) Color.White else Color(0xFF171D28)).onFocusChanged { focused = it.isFocused }.focusable()) { Icon(icon, desc, tint = if (focused) Color.Black else Color.White) }
 }
+
+@Composable private fun SettingsDialog(loading: Boolean, onRefresh: () -> Unit, onClose: () -> Unit) {
+    AlertDialog(onDismissRequest = onClose, title = { Text("Live TV Settings") }, text = { Column(verticalArrangement = Arrangement.spacedBy(14.dp)) { Text("Playlist: GitHub Raw M3U"); Text("Auto refresh: ${BrandConfig.REFRESH_INTERVAL_MS / 60000} minutes", color = Color(0xFF9BA5B5)); Button(onClick = onRefresh, enabled = !loading, modifier = Modifier.fillMaxWidth()) { Icon(Icons.Default.Refresh, null); Spacer(Modifier.width(8.dp)); Text(if (loading) "Refreshing…" else "Refresh channels") } } }, confirmButton = { TextButton(onClick = onClose) { Text("Close") } })
+}
+
+@Composable private fun Logo() {
+    if (BrandConfig.REMOTE_LOGO_URL.isNotBlank()) AsyncImage(BrandConfig.REMOTE_LOGO_URL, "Logo", contentScale = ContentScale.Fit, modifier = Modifier.size(58.dp).clip(RoundedCornerShape(14.dp)))
+    else Box(Modifier.size(58.dp).clip(RoundedCornerShape(14.dp)).background(Color.White), contentAlignment = Alignment.Center) { Icon(Icons.Default.Tv, null, tint = Color.Black, modifier = Modifier.size(34.dp)) }
+}
+
+@Composable private fun LoadingRows() { Column(verticalArrangement = Arrangement.spacedBy(22.dp)) { repeat(3) { Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) { repeat(5) { Box(Modifier.width(208.dp).height(136.dp).clip(RoundedCornerShape(17.dp)).background(Color(0xFF121722))) } } } } }
+
+@Composable private fun ErrorState(message: String, retry: () -> Unit) { Column(Modifier.fillMaxWidth().padding(top = 70.dp), horizontalAlignment = Alignment.CenterHorizontally) { Icon(Icons.Default.CloudOff, null, modifier = Modifier.size(50.dp), tint = Color(0xFF8E98A9)); Spacer(Modifier.height(13.dp)); Text(message, color = Color(0xFFB8C0CD), fontSize = 17.sp); Spacer(Modifier.height(15.dp)); Button(onClick = retry) { Text("Retry") } } }
