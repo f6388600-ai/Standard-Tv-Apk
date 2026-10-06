@@ -179,27 +179,48 @@ private fun HomeScreen(
             .fillMaxSize()
             .background(
                 Brush.verticalGradient(
-                    listOf(Color(0xFF0A0D13), Color(0xFF050609))
+                    listOf(Color(0xFF080B12), Color(0xFF050609))
                 )
             )
     ) {
-        Column(Modifier.fillMaxSize().padding(horizontal = 52.dp, vertical = 28.dp)) {
+        Column(
+            Modifier
+                .fillMaxSize()
+                .padding(horizontal = 42.dp, vertical = 28.dp)
+        ) {
             Row(
                 Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Logo()
-                Spacer(Modifier.width(18.dp))
+                Spacer(Modifier.width(16.dp))
                 Column {
-                    Text(BrandConfig.APP_NAME, fontSize = 30.sp, fontWeight = FontWeight.Bold)
                     Text(
-                        if (loading) "Loading live channels…" else "${channels.size} channels available",
-                        color = Color(0xFF9EA5B2),
-                        fontSize = 14.sp
+                        BrandConfig.APP_NAME,
+                        fontSize = 30.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        if (loading) "Loading live channels…"
+                        else "LIVE • FAST • PREMIUM",
+                        color = Color(0xFFA56BFF),
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Medium
                     )
                 }
                 Spacer(Modifier.weight(1f))
-                Icon(Icons.Default.Search, null, tint = Color(0xFFB9C0CC), modifier = Modifier.size(30.dp))
+                Surface(
+                    shape = RoundedCornerShape(18.dp),
+                    color = Color(0xFF21114A)
+                ) {
+                    Text(
+                        "LIVE",
+                        color = Color(0xFFB985FF),
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(horizontal = 18.dp, vertical = 12.dp)
+                    )
+                }
             }
 
             Spacer(Modifier.height(28.dp))
@@ -211,24 +232,25 @@ private fun HomeScreen(
                 else -> {
                     LazyColumn(
                         state = rememberLazyListState(),
-                        verticalArrangement = Arrangement.spacedBy(26.dp),
-                        contentPadding = PaddingValues(bottom = 32.dp)
+                        verticalArrangement = Arrangement.spacedBy(30.dp),
+                        contentPadding = PaddingValues(bottom = 36.dp)
                     ) {
                         grouped.forEach { (category, list) ->
-                            item(key = "header_$category") {
-                                Text(
-                                    category,
-                                    fontSize = 23.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    modifier = Modifier.padding(start = 4.dp)
+                            item(key = "category_$category") {
+                                CategoryRow(
+                                    category = category,
+                                    count = list.size
                                 )
                             }
-                            item(key = "row_$category") {
+                            item(key = "channels_$category") {
                                 LazyRow(
-                                    horizontalArrangement = Arrangement.spacedBy(18.dp),
-                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp)
+                                    horizontalArrangement = Arrangement.spacedBy(22.dp),
+                                    contentPadding = PaddingValues(horizontal = 4.dp, vertical = 8.dp)
                                 ) {
-                                    itemsIndexed(list, key = { _, c -> c.id }) { _, channel ->
+                                    itemsIndexed(
+                                        list,
+                                        key = { _, channel -> channel.id }
+                                    ) { _, channel ->
                                         ChannelCard(channel, onChannel)
                                     }
                                 }
@@ -242,24 +264,66 @@ private fun HomeScreen(
 }
 
 @Composable
+private fun CategoryRow(category: String, count: Int) {
+    Row(
+        Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            Modifier
+                .width(6.dp)
+                .height(30.dp)
+                .clip(RoundedCornerShape(4.dp))
+                .background(Color(0xFF8A45FF))
+        )
+        Spacer(Modifier.width(12.dp))
+        Text(
+            category.uppercase(Locale.US),
+            fontSize = 22.sp,
+            fontWeight = FontWeight.Bold,
+            color = Color(0xFFF3F4F7)
+        )
+        Spacer(Modifier.weight(1f))
+        Text(
+            count.toString(),
+            color = Color(0xFF9EA5B2),
+            fontSize = 15.sp
+        )
+        Spacer(Modifier.width(12.dp))
+        Text(
+            "See More",
+            color = Color(0xFFA56BFF),
+            fontSize = 15.sp,
+            fontWeight = FontWeight.Medium
+        )
+    }
+}
+
+@Composable
 private fun ChannelCard(channel: Channel, onClick: (Channel) -> Unit) {
     var focused by remember { mutableStateOf(false) }
     val scale by animateFloatAsState(
-        targetValue = if (focused) 1.10f else 1f,
+        targetValue = if (focused) 1.07f else 1f,
         animationSpec = tween(150),
         label = "focusScale"
     )
 
-    Box(
+    Column(
         modifier = Modifier
-            .width(210.dp)
-            .height(132.dp)
+            .width(220.dp)
             .scale(scale)
-            .clip(RoundedCornerShape(16.dp))
-            .background(Color(0xFF121722))
+            .clip(RoundedCornerShape(18.dp))
+            .background(Color(0xFFF7F7F8))
             .then(
-                if (focused) Modifier.border(3.dp, Color.White, RoundedCornerShape(16.dp))
-                else Modifier.border(1.dp, Color(0xFF252C39), RoundedCornerShape(16.dp))
+                if (focused) Modifier.border(
+                    3.dp,
+                    Color(0xFF8A45FF),
+                    RoundedCornerShape(18.dp)
+                ) else Modifier.border(
+                    1.dp,
+                    Color(0xFF2A3140),
+                    RoundedCornerShape(18.dp)
+                )
             )
             .onFocusChanged { focused = it.isFocused }
             .focusable()
@@ -271,41 +335,59 @@ private fun ChannelCard(channel: Channel, onClick: (Channel) -> Unit) {
                     true
                 } else false
             }
-            .padding(12.dp),
-        contentAlignment = Alignment.Center
+            .padding(10.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        if (channel.logo.isNotBlank()) {
-            AsyncImage(
-                model = channel.logo,
-                contentDescription = channel.name,
-                contentScale = ContentScale.Fit,
-                modifier = Modifier.fillMaxSize(0.62f)
-            )
-        } else {
-            Text(
-                channel.name,
-                fontSize = 20.sp,
-                fontWeight = FontWeight.Bold,
-                maxLines = 2
-            )
-        }
-
         Box(
-            Modifier.align(Alignment.TopStart)
-                .clip(RoundedCornerShape(6.dp))
-                .background(Color(0xFFDA2C38))
-                .padding(horizontal = 7.dp, vertical = 3.dp)
+            Modifier
+                .fillMaxWidth()
+                .height(118.dp),
+            contentAlignment = Alignment.Center
         ) {
-            Text("LIVE", fontSize = 10.sp, fontWeight = FontWeight.Bold)
+            if (channel.logo.isNotBlank()) {
+                AsyncImage(
+                    model = channel.logo,
+                    contentDescription = channel.name,
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier.fillMaxSize(0.78f)
+                )
+            } else {
+                Icon(
+                    Icons.Default.Tv,
+                    contentDescription = null,
+                    tint = Color(0xFF687080),
+                    modifier = Modifier.size(48.dp)
+                )
+            }
+
+            Box(
+                Modifier
+                    .align(Alignment.TopEnd)
+                    .clip(RoundedCornerShape(7.dp))
+                    .background(Color(0xFFE9E9EC))
+                    .padding(horizontal = 7.dp, vertical = 4.dp)
+            ) {
+                Icon(
+                    Icons.Default.StarBorder,
+                    contentDescription = "Favorite",
+                    tint = Color(0xFF555B66),
+                    modifier = Modifier.size(17.dp)
+                )
+            }
         }
 
+        Spacer(Modifier.height(4.dp))
         Text(
             channel.name,
-            fontSize = 12.sp,
+            color = Color(0xFF171A21),
+            fontSize = 15.sp,
+            fontWeight = FontWeight.SemiBold,
             maxLines = 1,
-            color = Color(0xFFE6E9EF),
-            modifier = Modifier.align(Alignment.BottomStart)
+            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+            modifier = Modifier.fillMaxWidth(),
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center
         )
+        Spacer(Modifier.height(6.dp))
     }
 }
 
