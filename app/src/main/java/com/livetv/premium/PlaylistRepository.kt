@@ -63,8 +63,7 @@ object PlaylistRepository {
         candidates.map { candidate ->
             async(Dispatchers.IO) {
                 val url = chooseWorkingUrl(candidate.urls)
-                if (url.isBlank()) null
-                else Channel(
+                if (url.isBlank()) null else Channel(
                     id = candidate.id,
                     name = candidate.name,
                     url = url,

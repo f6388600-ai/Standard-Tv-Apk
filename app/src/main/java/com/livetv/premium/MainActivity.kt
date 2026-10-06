@@ -38,8 +38,8 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -348,7 +348,7 @@ private fun ChannelCard(channel: Channel, onClick: (Channel) -> Unit, weight: Mo
             verticalArrangement = Arrangement.Center
         ) {
             AsyncImage(
-                model = if (channel.logo.isBlank()) R.drawable.app_logo else channel.logo,
+                model = if (channel.logo.isBlank()) painterResource(R.drawable.app_logo) else channel.logo,
                 contentDescription = channel.name,
                 placeholder = painterResource(R.drawable.app_logo),
                 error = painterResource(R.drawable.app_logo),
@@ -497,7 +497,7 @@ private fun Logo(modifier: Modifier = Modifier) {
         )
     } else {
         AsyncImage(
-            model = R.drawable.app_logo,
+            model = painterResource(R.drawable.app_logo),
             contentDescription = BrandConfig.APP_NAME,
             contentScale = ContentScale.Fit,
             modifier = modifier.clip(RoundedCornerShape(18.dp))
