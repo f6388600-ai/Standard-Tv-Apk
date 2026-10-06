@@ -4,6 +4,17 @@ import android.app.Activity
 import android.content.Context
 import android.os.Bundle
 import android.util.Log
+import androidx.compose.foundation.gestures.animateScrollBy
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.focus.FocusDirection
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.unit.Dp
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.Crossfade
 import androidx.compose.foundation.shape.CircleShape
@@ -249,6 +260,7 @@ private fun LiveTvApp() {
                     PlayerScreen(
                         channel = channel,
                         nextChannel = if (currentIndex >= 0) channels.getOrNull(currentIndex + 1) else null,
+                        hasPrevious = currentIndex > 0,
                         onBack = { selected = null },
                         onPrevious = {
                             val index = channels.indexOfFirst { it.id == channel.id }
@@ -350,6 +362,8 @@ private fun TopBar(
     onAbout: () -> Unit,
     loading: Boolean
 ) {
+    val keyboard = LocalSoftwareKeyboardController.current
+    val focusManager = LocalFocusManager.current
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         Logo(Modifier.size(62.dp))
         Spacer(Modifier.width(14.dp))
@@ -372,11 +386,19 @@ private fun TopBar(
                     IconButton(onClick = { onQuery("") }) { Icon(Icons.Default.Close, "Clear") }
                 }
             },
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+            keyboardActions = KeyboardActions(onSearch = {
+                keyboard?.hide()
+                focusManager.moveFocus(FocusDirection.Down)
+            }),
             modifier = Modifier
                 .width(370.dp)
-                .focusable()
                 .onPreviewKeyEvent { event ->
-                    event.type == KeyEventType.KeyUp && event.key == Key.Enter
+                    // OK / Enter on the remote opens the keyboard on the first press.
+                    if (event.key == Key.DirectionCenter || event.key == Key.Enter || event.key == Key.NumPadEnter) {
+                        if (event.type == KeyEventType.KeyUp) keyboard?.show()
+                        true
+                    } else false
                 },
             shape = RoundedCornerShape(18.dp),
             colors = OutlinedTextFieldDefaults.colors(
@@ -395,14 +417,19 @@ private fun TopBar(
 }
 
 @Composable
-private fun HeaderButton(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, onClick: () -> Unit) {
+private fun HeaderButton(
+    icon: ImageVector,
+    label: String,
+    onClick: () -> Unit,
+    focusRequester: FocusRequester? = null
+) {
     var focused by remember { mutableStateOf(false) }
     Surface(
         onClick = onClick,
         modifier = Modifier
+            .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
             .size(64.dp)
-            .onFocusChanged { focused = it.isFocused }
-            .focusable()
+            .onFocusChanged { focused = it.hasFocus }
             .then(if (focused) Modifier.border(2.dp, Color(0xFFA56BFF), RoundedCornerShape(18.dp)) else Modifier),
         shape = RoundedCornerShape(18.dp),
         color = if (focused) Color(0xFF2B1850) else Color(0xFF151A27)
@@ -459,13 +486,7 @@ private fun ChannelCard(channel: Channel, onClick: (Channel) -> Unit, weight: Mo
         modifier = weight
             .scale(scale)
             .height(148.dp)
-            .onFocusChanged { focused = it.isFocused }
-            .focusable()
-            .onPreviewKeyEvent { event ->
-                if (event.type == KeyEventType.KeyUp && (event.key == Key.Enter || event.key == Key.DirectionCenter)) {
-                    onClick(channel); true
-                } else false
-            },
+            .onFocusChanged { focused = it.hasFocus },
         shape = RoundedCornerShape(16.dp),
         color = if (focused) Color(0xFF29164A) else Color(0xFF151A25),
         border = androidx.compose.foundation.BorderStroke(
@@ -515,13 +536,15 @@ private fun friendlyError(e: PlaybackException): String = when (e.errorCode) {
 private fun PlayerScreen(
     channel: Channel,
     nextChannel: Channel?,
+    hasPrevious: Boolean,
     onBack: () -> Unit,
     onPrevious: () -> Unit,
     onNext: () -> Unit
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
-    var showBackButton by remember { mutableStateOf(false) }
+    val rootFocus = remember { FocusRequester() }
+    val playFocus = remember { FocusRequester() }
 
     // Re-use the pre-buffered player if one is ready for this channel => instant start.
     val player = remember(channel.url) {
@@ -544,6 +567,10 @@ private fun PlayerScreen(
     var attempt by remember(channel.url) { mutableStateOf(0) }
     var retryNonce by remember(channel.url) { mutableStateOf(0) }
     var errorText by remember(channel.url) { mutableStateOf("") }
+    var controlsVisible by remember(channel.url) { mutableStateOf(true) }
+    var interaction by remember(channel.url) { mutableStateOf(0) }
+    var paused by remember(channel.url) { mutableStateOf(!player.playWhenReady) }
+    val showControls = controlsVisible && status != PlayStatus.FAILED
 
     fun restart() {
         player.setMediaItem(PlayerPreloader.mediaItem(channel.url))
@@ -577,6 +604,26 @@ private fun PlayerScreen(
             if (status == PlayStatus.LOADING || status == PlayStatus.RETRYING) {
                 handleFailure("The stream is taking too long to respond.")
             }
+        }
+    }
+
+    // Keep the controls up while loading, auto-hide 5s after the last key press once playing.
+    LaunchedEffect(status) {
+        if (status == PlayStatus.LOADING || status == PlayStatus.RETRYING) controlsVisible = true
+    }
+    LaunchedEffect(controlsVisible, interaction, status) {
+        if (controlsVisible && status == PlayStatus.PLAYING) {
+            delay(5_000)
+            controlsVisible = false
+        }
+    }
+    // Move remote focus between the control panel and the screen itself.
+    LaunchedEffect(showControls) {
+        delay(60)
+        try {
+            if (showControls) playFocus.requestFocus()
+            else if (status != PlayStatus.FAILED) rootFocus.requestFocus()
+        } catch (_: Throwable) {
         }
     }
 
@@ -614,6 +661,10 @@ private fun PlayerScreen(
             override fun onPlayerError(error: PlaybackException) {
                 handleFailure(friendlyError(error))
             }
+
+            override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+                paused = !playWhenReady
+            }
         }
         player.addListener(listener)
         onDispose {
@@ -623,32 +674,52 @@ private fun PlayerScreen(
         }
     }
 
-    Box(Modifier.fillMaxSize().background(Color.Black)) {
-        AndroidView(
-            factory = { ctx ->
-                PlayerView(ctx).apply {
-                    useController = true
-                    controllerAutoShow = true
-                    controllerHideOnTouch = true
-                    setPlayer(player)
-                    setControllerVisibilityListener(
-                        object : PlayerView.ControllerVisibilityListener {
-                            override fun onVisibilityChanged(visibility: Int) {
-                                showBackButton = visibility == android.view.View.VISIBLE
-                            }
-                        }
-                    )
-                    requestFocus()
-                }
-            },
-            modifier = Modifier.fillMaxSize().onPreviewKeyEvent { event ->
+    Box(
+        Modifier
+            .fillMaxSize()
+            .background(Color.Black)
+            .onPreviewKeyEvent { event ->
                 if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                interaction += 1
                 when (event.key) {
-                    Key.ChannelUp -> { onNext(); true }
-                    Key.ChannelDown -> { onPrevious(); true }
+                    Key.ChannelUp, Key.MediaNext -> { if (nextChannel != null) onNext(); true }
+                    Key.ChannelDown, Key.MediaPrevious -> { if (hasPrevious) onPrevious(); true }
+                    Key.MediaPlayPause -> { player.playWhenReady = !player.playWhenReady; true }
+                    Key.MediaPlay -> { player.playWhenReady = true; true }
+                    Key.MediaPause -> { player.playWhenReady = false; true }
+                    Key.DirectionUp, Key.DirectionDown, Key.DirectionLeft, Key.DirectionRight,
+                    Key.DirectionCenter, Key.Enter, Key.NumPadEnter -> {
+                        // Any D-pad key brings the control panel up.
+                        if (!showControls && status != PlayStatus.FAILED) {
+                            controlsVisible = true
+                            true
+                        } else false
+                    }
                     else -> false
                 }
             }
+            .focusRequester(rootFocus)
+            .focusable()
+    ) {
+        AndroidView(
+            factory = { ctx ->
+                PlayerView(ctx).apply {
+                    useController = false
+                    isFocusable = false
+                    isFocusableInTouchMode = false
+                    setPlayer(player)
+                }
+            },
+            modifier = Modifier.fillMaxSize()
+        )
+
+        // Tap anywhere on the video (touch) to toggle the controls.
+        Box(
+            Modifier
+                .fillMaxSize()
+                .pointerInput(Unit) {
+                    detectTapGestures(onTap = { controlsVisible = !controlsVisible })
+                }
         )
 
         PlayerStatusOverlay(
@@ -668,39 +739,143 @@ private fun PlayerScreen(
             onNext = onNext
         )
 
-        if (showBackButton || status == PlayStatus.LOADING || status == PlayStatus.RETRYING) {
-            Surface(
-                onClick = onBack,
-                modifier = Modifier
-                    .padding(14.dp)
-                    .align(Alignment.TopStart)
-                    .zIndex(10f)
-                    .focusable(),
-                shape = RoundedCornerShape(10.dp),
-                color = Color(0xE6080A10),
-                tonalElevation = 2.dp
+        PlayerControls(
+            visible = showControls,
+            channel = channel,
+            paused = paused,
+            hasPrevious = hasPrevious,
+            hasNext = nextChannel != null,
+            playFocus = playFocus,
+            onBack = onBack,
+            onPrevious = onPrevious,
+            onNext = onNext,
+            onToggle = { player.playWhenReady = !player.playWhenReady }
+        )
+    }
+}
+
+@Composable
+private fun PlayerControls(
+    visible: Boolean,
+    channel: Channel,
+    paused: Boolean,
+    hasPrevious: Boolean,
+    hasNext: Boolean,
+    playFocus: FocusRequester,
+    onBack: () -> Unit,
+    onPrevious: () -> Unit,
+    onNext: () -> Unit,
+    onToggle: () -> Unit
+) {
+    AnimatedVisibility(
+        visible = visible,
+        modifier = Modifier.fillMaxSize().zIndex(8f),
+        enter = fadeIn(tween(200)),
+        exit = fadeOut(tween(300))
+    ) {
+        Box(Modifier.fillMaxSize()) {
+            Row(
+                Modifier
+                    .align(Alignment.TopCenter)
+                    .fillMaxWidth()
+                    .background(Brush.verticalGradient(listOf(Color(0xCC000000), Color.Transparent)))
+                    .padding(horizontal = 28.dp, vertical = 18.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
+                BackPill(channel.name, onBack)
+                Spacer(Modifier.weight(1f))
                 Row(
-                    Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                    Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(Color(0xFFE5254B))
+                        .padding(horizontal = 10.dp, vertical = 4.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Icon(
-                        Icons.Default.ArrowBack,
-                        "Back",
-                        tint = Color.White,
-                        modifier = Modifier.size(18.dp)
-                    )
+                    Box(Modifier.size(7.dp).clip(CircleShape).background(Color.White))
                     Spacer(Modifier.width(6.dp))
-                    Text(
-                        channel.name,
-                        color = Color.White,
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.Bold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
+                    Text("LIVE", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.ExtraBold)
                 }
             }
+            Row(
+                Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .background(Brush.verticalGradient(listOf(Color.Transparent, Color(0xDD000000))))
+                    .padding(top = 36.dp, bottom = 30.dp),
+                horizontalArrangement = Arrangement.spacedBy(30.dp, Alignment.CenterHorizontally),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                if (hasPrevious) ControlButton(Icons.Default.SkipPrevious, "Previous channel", 58.dp, onClick = onPrevious)
+                ControlButton(
+                    if (paused) Icons.Default.PlayArrow else Icons.Default.Pause,
+                    if (paused) "Play" else "Pause",
+                    78.dp,
+                    modifier = Modifier.focusRequester(playFocus),
+                    onClick = onToggle
+                )
+                if (hasNext) ControlButton(Icons.Default.SkipNext, "Next channel", 58.dp, onClick = onNext)
+            }
+        }
+    }
+}
+
+@Composable
+private fun ControlButton(
+    icon: ImageVector,
+    label: String,
+    size: Dp,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    var focused by remember { mutableStateOf(false) }
+    val scale by animateFloatAsState(if (focused) 1.14f else 1f, tween(120), label = "controlScale")
+    Surface(
+        onClick = onClick,
+        modifier = modifier
+            .size(size)
+            .scale(scale)
+            .onFocusChanged { focused = it.hasFocus },
+        shape = CircleShape,
+        color = if (focused) Color(0xFFA56BFF) else Color(0xAA0C0F18),
+        border = androidx.compose.foundation.BorderStroke(
+            if (focused) 2.dp else 1.dp,
+            if (focused) Color.White else Color(0x44FFFFFF)
+        )
+    ) {
+        Box(contentAlignment = Alignment.Center) {
+            Icon(icon, label, tint = Color.White, modifier = Modifier.size(size * 0.5f))
+        }
+    }
+}
+
+@Composable
+private fun BackPill(title: String, onClick: () -> Unit) {
+    var focused by remember { mutableStateOf(false) }
+    Surface(
+        onClick = onClick,
+        modifier = Modifier.onFocusChanged { focused = it.hasFocus },
+        shape = RoundedCornerShape(14.dp),
+        color = if (focused) Color(0xFFA56BFF) else Color(0xAA0C0F18),
+        border = androidx.compose.foundation.BorderStroke(
+            if (focused) 2.dp else 1.dp,
+            if (focused) Color.White else Color(0x44FFFFFF)
+        )
+    ) {
+        Row(
+            Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(Icons.Default.ArrowBack, "Back", tint = Color.White, modifier = Modifier.size(20.dp))
+            Spacer(Modifier.width(8.dp))
+            Text(
+                title,
+                color = Color.White,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.widthIn(max = 320.dp)
+            )
         }
     }
 }
@@ -911,28 +1086,50 @@ private fun AboutScreen(onBack: () -> Unit) {
     val context = LocalContext.current
     val lastSync = remember { PlaylistRepository.lastSync(context) }
     val syncText = if (lastSync > 0L) DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT).format(Date(lastSync)) else "Not synced yet"
+    val scroll = rememberScrollState()
+    val scope = rememberCoroutineScope()
+    val backFocus = remember { FocusRequester() }
+    LaunchedEffect(Unit) {
+        try {
+            backFocus.requestFocus()
+        } catch (_: Throwable) {
+        }
+    }
 
     Box(
-        Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color(0xFF130B24), Color(0xFF07090E))))
+        Modifier
+            .fillMaxSize()
+            .background(Brush.verticalGradient(listOf(Color(0xFF130B24), Color(0xFF07090E))))
+            .onPreviewKeyEvent { event ->
+                // D-pad Up / Down scrolls the page; OK on the Back button goes back.
+                if (event.type == KeyEventType.KeyDown) {
+                    when (event.key) {
+                        Key.DirectionDown -> { scope.launch { scroll.animateScrollBy(280f) }; true }
+                        Key.DirectionUp -> { scope.launch { scroll.animateScrollBy(-280f) }; true }
+                        else -> false
+                    }
+                } else false
+            }
     ) {
-        Column(
-            Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(44.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
+        Column(Modifier.fillMaxSize().padding(horizontal = 44.dp, vertical = 30.dp)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                HeaderButton(Icons.Default.ArrowBack, "Back", onBack)
+                HeaderButton(Icons.Default.ArrowBack, "Back", onBack, backFocus)
                 Spacer(Modifier.width(20.dp))
                 Text("About", color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.ExtraBold)
             }
-            Spacer(Modifier.height(38.dp))
-            Logo(Modifier.size(100.dp))
-            Spacer(Modifier.height(16.dp))
-            Text(BrandConfig.APP_NAME, color = Color.White, fontSize = 32.sp, fontWeight = FontWeight.ExtraBold)
-            Text("Premium Live TV", color = Color(0xFFB982FF), fontSize = 15.sp, fontWeight = FontWeight.Bold)
-            Spacer(Modifier.height(30.dp))
-            AboutCard("APK Details", listOf("App: ${BrandConfig.APP_NAME}", "Version: 1.0.0", "Last playlist sync: $syncText", "Automatic playlist sync: Every 1 hour"))
-            Spacer(Modifier.height(18.dp))
-            AboutCard("Developer Details", listOf("Developer: Hasan Ahmed", "App: ${BrandConfig.APP_NAME}"))
+            Column(
+                Modifier.weight(1f).fillMaxWidth().verticalScroll(scroll).padding(top = 24.dp, bottom = 24.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Logo(Modifier.size(100.dp))
+                Spacer(Modifier.height(16.dp))
+                Text(BrandConfig.APP_NAME, color = Color.White, fontSize = 32.sp, fontWeight = FontWeight.ExtraBold)
+                Text("Premium Live TV", color = Color(0xFFB982FF), fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(30.dp))
+                AboutCard("APK Details", listOf("App: ${BrandConfig.APP_NAME}", "Version: 1.0.0", "Last playlist sync: $syncText", "Automatic playlist sync: Every 1 hour"))
+                Spacer(Modifier.height(18.dp))
+                AboutCard("Developer Details", listOf("Developer: Hasan Ahmed", "App: ${BrandConfig.APP_NAME}"))
+            }
         }
     }
 }
