@@ -12,6 +12,7 @@
         android:banner="@drawable/app_logo"
         android:usesCleartextTraffic="true"
         android:allowBackup="true"
+        android:largeHeap="true"
         android:supportsRtl="true">
 
         <activity

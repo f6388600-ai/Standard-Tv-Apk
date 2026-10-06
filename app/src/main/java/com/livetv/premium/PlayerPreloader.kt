@@ -1,5 +1,6 @@
 package com.livetv.premium
 
+import android.app.ActivityManager
 import android.content.Context
 import android.os.SystemClock
 import androidx.media3.common.AudioAttributes
@@ -28,6 +29,19 @@ object PlayerPreloader {
         return builder.build()
     }
 
+    /** How far ahead we keep buffering: 5 min on normal devices, 2 min on low-memory ones. */
+    fun dvrMaxMs(context: Context): Long {
+        val am = context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
+        val low = am == null || am.isLowRamDevice || am.largeMemoryClass < 192
+        return if (low) 2 * 60_000L else 5 * 60_000L
+    }
+
+    private fun bufferBytes(context: Context): Int {
+        val am = context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
+        val mb = am?.largeMemoryClass ?: 128
+        return (mb * 1024L * 1024L * 35L / 100L).coerceIn(24L * 1024 * 1024, 160L * 1024 * 1024).toInt()
+    }
+
     fun create(context: Context): ExoPlayer {
         val app = context.applicationContext
         val http = DefaultHttpDataSource.Factory()
@@ -35,10 +49,11 @@ object PlayerPreloader {
             .setConnectTimeoutMs(8_000)
             .setReadTimeoutMs(8_000)
             .setUserAgent("HasuLiveTv/1.0")
-        // Start playing after only ~1s of buffered data for a fast start.
+        // Start after ~1s of data (fast start), but keep downloading ahead - also while paused -
+        // up to dvrMaxMs / the memory cap, so resuming after a pause never stalls.
         val loadControl = DefaultLoadControl.Builder()
-            .setBufferDurationsMs(10_000, 40_000, 1_000, 2_000)
-            .setPrioritizeTimeOverSizeThresholds(true)
+            .setBufferDurationsMs(30_000, dvrMaxMs(app).toInt(), 1_000, 2_000)
+            .setTargetBufferBytes(bufferBytes(app))
             .build()
         val audio = AudioAttributes.Builder()
             .setUsage(C.USAGE_MEDIA)

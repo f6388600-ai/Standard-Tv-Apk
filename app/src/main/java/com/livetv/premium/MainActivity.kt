@@ -4,6 +4,12 @@ import android.app.Activity
 import android.content.Context
 import android.os.Bundle
 import android.util.Log
+import android.os.SystemClock
+import androidx.media3.common.C
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.input.key.nativeKeyEvent
+import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.gestures.animateScrollBy
@@ -618,6 +624,17 @@ private fun friendlyError(e: PlaybackException): String = when (e.errorCode) {
     else -> "Playback error (${e.errorCodeName})"
 }
 
+private const val RESUME_PROMPT_MS = 10_000L
+private const val SEEK_STEP_MS = 10_000L
+private const val LIVE_EDGE_MS = 3_000L
+
+private fun fmtTime(ms: Long): String {
+    val total = (ms / 1000L).coerceAtLeast(0L)
+    val m = total / 60L
+    val sec = total % 60L
+    return "$m:${if (sec < 10L) "0" else ""}$sec"
+}
+
 @Composable
 private fun PlayerScreen(
     channel: Channel,
@@ -631,6 +648,7 @@ private fun PlayerScreen(
     val lifecycleOwner = LocalLifecycleOwner.current
     val rootFocus = remember { FocusRequester() }
     val playFocus = remember { FocusRequester() }
+    val dvrCap = remember { PlayerPreloader.dvrMaxMs(context) }
 
     // Re-use the pre-buffered player if one is ready for this channel => instant start.
     val player = remember(channel.url) {
@@ -656,12 +674,84 @@ private fun PlayerScreen(
     var controlsVisible by remember(channel.url) { mutableStateOf(true) }
     var interaction by remember(channel.url) { mutableStateOf(0) }
     var paused by remember(channel.url) { mutableStateOf(!player.playWhenReady) }
-    val showControls = controlsVisible && status != PlayStatus.FAILED
+
+    // Time-shift bookkeeping: how far behind the live edge the viewer currently is.
+    var behindBase by remember(channel.url) { mutableStateOf(0L) }
+    var pausedAt by remember(channel.url) { mutableStateOf(0L) }
+    var tick by remember(channel.url) { mutableStateOf(0L) }
+    var pos by remember(channel.url) { mutableStateOf(0L) }
+    var resumePrompt by remember(channel.url) { mutableStateOf(false) }
+    var flash by remember(channel.url) { mutableStateOf(0) }
+    var flashNonce by remember(channel.url) { mutableStateOf(0) }
+    var noticeText by remember(channel.url) { mutableStateOf("") }
+    var noticeVisible by remember(channel.url) { mutableStateOf(false) }
+
+    val behind = (behindBase + (if (pausedAt > 0L) (tick - pausedAt).coerceAtLeast(0L) else 0L)).coerceIn(0L, dvrCap)
+    val overlayFocus = status == PlayStatus.FAILED || resumePrompt
+    val showControls = controlsVisible && !overlayFocus
+
+    fun nowMs(): Long = SystemClock.elapsedRealtime()
+
+    fun currentBehind(): Long =
+        (behindBase + (if (pausedAt > 0L) (nowMs() - pausedAt).coerceAtLeast(0L) else 0L)).coerceIn(0L, dvrCap)
+
+    fun commitPause() {
+        if (pausedAt > 0L) {
+            behindBase = (behindBase + (nowMs() - pausedAt)).coerceIn(0L, dvrCap)
+            pausedAt = 0L
+        }
+    }
 
     fun restart() {
         player.setMediaItem(PlayerPreloader.mediaItem(channel.url))
         player.prepare()
         player.playWhenReady = true
+    }
+
+    fun goLive() {
+        pausedAt = 0L
+        behindBase = 0L
+        player.seekToDefaultPosition()
+        player.playWhenReady = true
+    }
+
+    fun resumeNow() {
+        commitPause()
+        player.playWhenReady = true
+    }
+
+    // After a longer pause we ask: Continue Watching or Watch Live.
+    fun requestPlay() {
+        val pausedFor = if (pausedAt > 0L) nowMs() - pausedAt else 0L
+        if (pausedFor > RESUME_PROMPT_MS) resumePrompt = true else resumeNow()
+    }
+
+    fun togglePlay() {
+        if (player.playWhenReady) player.playWhenReady = false else requestPlay()
+    }
+
+    /** Seek relative to now. Returns true if the position actually changed. */
+    fun seekBy(deltaMs: Long): Boolean {
+        val b = currentBehind()
+        if (deltaMs > 0L && b <= LIVE_EDGE_MS) return false
+        if (deltaMs > 0L && b <= deltaMs) {
+            goLive()
+            return true
+        }
+        val dur = player.duration
+        val cur = player.currentPosition.coerceAtLeast(0L)
+        val maxPos = if (dur == C.TIME_UNSET || dur <= 0L) Long.MAX_VALUE else dur
+        val target = (cur + deltaMs).coerceIn(0L, maxPos)
+        val actual = target - cur
+        if (actual == 0L) return false
+        if (pausedAt > 0L) {
+            behindBase = (behindBase + (nowMs() - pausedAt)).coerceIn(0L, dvrCap)
+            pausedAt = nowMs()
+        }
+        player.seekTo(target)
+        behindBase = (behindBase - actual).coerceIn(0L, dvrCap)
+        pos = target
+        return true
     }
 
     fun handleFailure(message: String) {
@@ -693,23 +783,54 @@ private fun PlayerScreen(
         }
     }
 
-    // Keep the controls up while loading, auto-hide 5s after the last key press once playing.
+    // Keep the controls up while loading or paused; auto-hide 5s after the last key press while playing.
     LaunchedEffect(status) {
         if (status == PlayStatus.LOADING || status == PlayStatus.RETRYING) controlsVisible = true
     }
-    LaunchedEffect(controlsVisible, interaction, status) {
-        if (controlsVisible && status == PlayStatus.PLAYING) {
+    LaunchedEffect(controlsVisible, interaction, status, paused) {
+        if (controlsVisible && status == PlayStatus.PLAYING && !paused) {
             delay(5_000)
             controlsVisible = false
         }
     }
-    // Move remote focus between the control panel and the screen itself.
-    LaunchedEffect(showControls) {
+    // Move remote focus between the control panel, the dialogs and the screen itself.
+    LaunchedEffect(showControls, overlayFocus) {
         delay(60)
         try {
             if (showControls) playFocus.requestFocus()
-            else if (status != PlayStatus.FAILED) rootFocus.requestFocus()
+            else if (!overlayFocus) rootFocus.requestFocus()
         } catch (_: Throwable) {
+        }
+    }
+
+    // Clock for the "-m:ss behind live" label while paused.
+    LaunchedEffect(pausedAt) {
+        if (pausedAt > 0L) {
+            while (true) {
+                tick = SystemClock.elapsedRealtime()
+                delay(500)
+            }
+        }
+    }
+    // How much video exists behind the playhead (what the bar can reach).
+    LaunchedEffect(showControls) {
+        if (showControls) {
+            while (true) {
+                pos = player.currentPosition.coerceAtLeast(0L)
+                delay(500)
+            }
+        }
+    }
+    LaunchedEffect(flashNonce) {
+        if (flashNonce > 0) {
+            delay(650)
+            flash = 0
+        }
+    }
+    LaunchedEffect(noticeVisible) {
+        if (noticeVisible) {
+            delay(3_500)
+            noticeVisible = false
         }
     }
 
@@ -745,11 +866,31 @@ private fun PlayerScreen(
             }
 
             override fun onPlayerError(error: PlaybackException) {
+                // Paused so long that the server dropped our position: jump back to live.
+                if (error.errorCode == PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW && attempt < MAX_RETRIES) {
+                    attempt += 1
+                    pausedAt = 0L
+                    behindBase = 0L
+                    noticeText = "You were too far behind - back to live"
+                    noticeVisible = true
+                    player.seekToDefaultPosition()
+                    player.prepare()
+                    player.playWhenReady = true
+                    return
+                }
                 handleFailure(friendlyError(error))
             }
 
             override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
                 paused = !playWhenReady
+                if (!playWhenReady) {
+                    if (pausedAt == 0L) {
+                        pausedAt = SystemClock.elapsedRealtime()
+                        tick = pausedAt
+                    }
+                } else {
+                    commitPause()
+                }
             }
         }
         player.addListener(listener)
@@ -770,13 +911,15 @@ private fun PlayerScreen(
                 when (event.key) {
                     Key.ChannelUp, Key.MediaNext -> { if (nextChannel != null) onNext(); true }
                     Key.ChannelDown, Key.MediaPrevious -> { if (hasPrevious) onPrevious(); true }
-                    Key.MediaPlayPause -> { player.playWhenReady = !player.playWhenReady; true }
-                    Key.MediaPlay -> { player.playWhenReady = true; true }
+                    Key.MediaPlayPause -> { togglePlay(); true }
+                    Key.MediaPlay -> { requestPlay(); true }
                     Key.MediaPause -> { player.playWhenReady = false; true }
+                    Key.MediaRewind -> { if (seekBy(-SEEK_STEP_MS)) flash = -1; flashNonce += 1; true }
+                    Key.MediaFastForward -> { if (seekBy(SEEK_STEP_MS)) flash = 1; flashNonce += 1; true }
                     Key.DirectionUp, Key.DirectionDown, Key.DirectionLeft, Key.DirectionRight,
                     Key.DirectionCenter, Key.Enter, Key.NumPadEnter -> {
                         // Any D-pad key brings the control panel up.
-                        if (!showControls && status != PlayStatus.FAILED) {
+                        if (!showControls && !overlayFocus) {
                             controlsVisible = true
                             true
                         } else false
@@ -799,14 +942,25 @@ private fun PlayerScreen(
             modifier = Modifier.fillMaxSize()
         )
 
-        // Tap anywhere on the video (touch) to toggle the controls.
+        // Touch: tap = show/hide controls, double tap left/right half = -10s / +10s.
         Box(
             Modifier
                 .fillMaxSize()
                 .pointerInput(Unit) {
-                    detectTapGestures(onTap = { controlsVisible = !controlsVisible })
+                    detectTapGestures(
+                        onTap = { controlsVisible = !controlsVisible },
+                        onDoubleTap = { offset ->
+                            val left = offset.x < size.width / 2f
+                            if (seekBy(if (left) -SEEK_STEP_MS else SEEK_STEP_MS)) {
+                                flash = if (left) -1 else 1
+                                flashNonce += 1
+                            }
+                        }
+                    )
                 }
         )
+
+        SeekFlashOverlay(flash)
 
         PlayerStatusOverlay(
             channel = channel,
@@ -831,12 +985,154 @@ private fun PlayerScreen(
             paused = paused,
             hasPrevious = hasPrevious,
             hasNext = nextChannel != null,
+            behindMs = behind,
+            availableMs = (behind + pos).coerceAtMost(dvrCap),
+            capMs = dvrCap,
             playFocus = playFocus,
             onBack = onBack,
             onPrevious = onPrevious,
             onNext = onNext,
-            onToggle = { player.playWhenReady = !player.playWhenReady }
+            onToggle = { togglePlay() },
+            onSeekBy = { delta ->
+                if (seekBy(delta)) {
+                    flash = if (delta < 0L) -1 else 1
+                    flashNonce += 1
+                }
+            },
+            onGoLive = { goLive() }
         )
+
+        ResumePrompt(
+            visible = resumePrompt,
+            behindMs = behind,
+            onContinue = {
+                resumePrompt = false
+                resumeNow()
+                controlsVisible = true
+            },
+            onLive = {
+                resumePrompt = false
+                goLive()
+                controlsVisible = true
+            }
+        )
+
+        AnimatedVisibility(
+            visible = noticeVisible,
+            modifier = Modifier.fillMaxSize().zIndex(9f),
+            enter = fadeIn(tween(200)),
+            exit = fadeOut(tween(300))
+        ) {
+            Box(Modifier.fillMaxSize().padding(top = 76.dp), contentAlignment = Alignment.TopCenter) {
+                Surface(shape = RoundedCornerShape(20.dp), color = Color(0xE6141826)) {
+                    Text(
+                        noticeText,
+                        color = Color.White,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 9.dp)
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SeekFlashOverlay(flash: Int) {
+    Row(Modifier.fillMaxSize().zIndex(4f)) {
+        Box(Modifier.weight(1f).fillMaxHeight(), contentAlignment = Alignment.Center) {
+            AnimatedVisibility(visible = flash < 0, enter = fadeIn(tween(80)), exit = fadeOut(tween(300))) {
+                SeekBadge(Icons.Default.FastRewind)
+            }
+        }
+        Box(Modifier.weight(1f).fillMaxHeight(), contentAlignment = Alignment.Center) {
+            AnimatedVisibility(visible = flash > 0, enter = fadeIn(tween(80)), exit = fadeOut(tween(300))) {
+                SeekBadge(Icons.Default.FastForward)
+            }
+        }
+    }
+}
+
+@Composable
+private fun SeekBadge(icon: ImageVector) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Box(
+            Modifier.size(72.dp).clip(CircleShape).background(Color(0x99000000)),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(icon, null, tint = Color.White, modifier = Modifier.size(38.dp))
+        }
+        Spacer(Modifier.height(6.dp))
+        Text("10 seconds", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+    }
+}
+
+@Composable
+private fun ResumePrompt(
+    visible: Boolean,
+    behindMs: Long,
+    onContinue: () -> Unit,
+    onLive: () -> Unit
+) {
+    AnimatedVisibility(
+        visible = visible,
+        modifier = Modifier.fillMaxSize().zIndex(7f),
+        enter = fadeIn(tween(250)) + scaleIn(initialScale = 0.94f),
+        exit = fadeOut(tween(200))
+    ) {
+        val focus = remember { FocusRequester() }
+        LaunchedEffect(Unit) {
+            delay(80)
+            try {
+                focus.requestFocus()
+            } catch (_: Throwable) {
+            }
+        }
+        Box(
+            Modifier.fillMaxSize().background(Color(0xCC05060A)),
+            contentAlignment = Alignment.Center
+        ) {
+            Surface(
+                shape = RoundedCornerShape(24.dp),
+                color = Color(0xF2141826),
+                border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF343B4E))
+            ) {
+                Column(
+                    Modifier.padding(horizontal = 40.dp, vertical = 30.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Icon(Icons.Default.PauseCircle, null, tint = Color(0xFFB982FF), modifier = Modifier.size(50.dp))
+                    Spacer(Modifier.height(10.dp))
+                    Text("Welcome back", color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.ExtraBold)
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        "You are ${fmtTime(behindMs)} behind the live broadcast.\nContinue where you left off, or jump to live.",
+                        color = Color(0xFFC4CAD6),
+                        fontSize = 14.sp,
+                        textAlign = TextAlign.Center
+                    )
+                    Spacer(Modifier.height(24.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Button(
+                            onClick = onContinue,
+                            shape = RoundedCornerShape(14.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFA56BFF), contentColor = Color.White),
+                            modifier = Modifier.focusRequester(focus)
+                        ) {
+                            Icon(Icons.Default.PlayArrow, null, modifier = Modifier.size(20.dp))
+                            Spacer(Modifier.width(8.dp))
+                            Text("Continue Watching", fontWeight = FontWeight.Bold)
+                        }
+                        OutlinedButton(onClick = onLive, shape = RoundedCornerShape(14.dp)) {
+                            Icon(Icons.Default.LiveTv, null, modifier = Modifier.size(20.dp))
+                            Spacer(Modifier.width(8.dp))
+                            Text("Watch Live", fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -847,12 +1143,18 @@ private fun PlayerControls(
     paused: Boolean,
     hasPrevious: Boolean,
     hasNext: Boolean,
+    behindMs: Long,
+    availableMs: Long,
+    capMs: Long,
     playFocus: FocusRequester,
     onBack: () -> Unit,
     onPrevious: () -> Unit,
     onNext: () -> Unit,
-    onToggle: () -> Unit
+    onToggle: () -> Unit,
+    onSeekBy: (Long) -> Unit,
+    onGoLive: () -> Unit
 ) {
+    val atLive = behindMs <= LIVE_EDGE_MS
     AnimatedVisibility(
         visible = visible,
         modifier = Modifier.fillMaxSize().zIndex(8f),
@@ -873,34 +1175,160 @@ private fun PlayerControls(
                 Row(
                     Modifier
                         .clip(RoundedCornerShape(8.dp))
-                        .background(Color(0xFFE5254B))
+                        .background(if (atLive) Color(0xFFE5254B) else Color(0xFF3A3F52))
                         .padding(horizontal = 10.dp, vertical = 4.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Box(Modifier.size(7.dp).clip(CircleShape).background(Color.White))
                     Spacer(Modifier.width(6.dp))
-                    Text("LIVE", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.ExtraBold)
+                    Text(
+                        if (atLive) "LIVE" else "-${fmtTime(behindMs)}",
+                        color = Color.White,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.ExtraBold
+                    )
                 }
             }
-            Row(
+            Column(
                 Modifier
                     .align(Alignment.BottomCenter)
                     .fillMaxWidth()
-                    .background(Brush.verticalGradient(listOf(Color.Transparent, Color(0xDD000000))))
-                    .padding(top = 36.dp, bottom = 30.dp),
-                horizontalArrangement = Arrangement.spacedBy(30.dp, Alignment.CenterHorizontally),
-                verticalAlignment = Alignment.CenterVertically
+                    .background(Brush.verticalGradient(listOf(Color.Transparent, Color(0xEE000000))))
+                    .padding(start = 40.dp, end = 40.dp, top = 40.dp, bottom = 24.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                if (hasPrevious) ControlButton(Icons.Default.SkipPrevious, "Previous channel", 58.dp, onClick = onPrevious)
-                ControlButton(
-                    if (paused) Icons.Default.PlayArrow else Icons.Default.Pause,
-                    if (paused) "Play" else "Pause",
-                    78.dp,
-                    modifier = Modifier.focusRequester(playFocus),
-                    onClick = onToggle
-                )
-                if (hasNext) ControlButton(Icons.Default.SkipNext, "Next channel", 58.dp, onClick = onNext)
+                DvrBar(behindMs, availableMs, capMs, onSeekBy, Modifier.fillMaxWidth())
+                Spacer(Modifier.height(10.dp))
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(22.dp, Alignment.CenterHorizontally),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    if (hasPrevious) ControlButton(Icons.Default.SkipPrevious, "Previous channel", 52.dp, onClick = onPrevious)
+                    ControlButton(Icons.Default.Replay10, "Back 10 seconds", 52.dp, onClick = { onSeekBy(-SEEK_STEP_MS) })
+                    ControlButton(
+                        if (paused) Icons.Default.PlayArrow else Icons.Default.Pause,
+                        if (paused) "Play" else "Pause",
+                        74.dp,
+                        modifier = Modifier.focusRequester(playFocus),
+                        onClick = onToggle
+                    )
+                    ControlButton(Icons.Default.Forward10, "Forward 10 seconds", 52.dp, onClick = { onSeekBy(SEEK_STEP_MS) })
+                    if (hasNext) ControlButton(Icons.Default.SkipNext, "Next channel", 52.dp, onClick = onNext)
+                    LivePill(atLive, onGoLive)
+                }
             }
+        }
+    }
+}
+
+/** YouTube-style time bar: right end = live. Left/Right on the remote moves it by 10s. */
+@Composable
+private fun DvrBar(
+    behindMs: Long,
+    availableMs: Long,
+    capMs: Long,
+    onSeekBy: (Long) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    var focused by remember { mutableStateOf(false) }
+    val behindState by rememberUpdatedState(behindMs)
+    val seek by rememberUpdatedState(onSeekBy)
+    val cap = capMs.coerceAtLeast(1L)
+    val frac = (1f - behindMs.toFloat() / cap.toFloat()).coerceIn(0f, 1f)
+    val availFrac = (1f - availableMs.toFloat() / cap.toFloat()).coerceIn(0f, 1f)
+    val atLive = behindMs <= LIVE_EDGE_MS
+    var lastDragX by remember { mutableStateOf(-1f) }
+
+    Row(modifier, verticalAlignment = Alignment.CenterVertically) {
+        Text("-${fmtTime(cap)}", color = Color(0xFF9FA7B8), fontSize = 12.sp)
+        Spacer(Modifier.width(12.dp))
+        Box(
+            Modifier
+                .weight(1f)
+                .height(40.dp)
+                .onFocusChanged { focused = it.hasFocus }
+                .onKeyEvent { event ->
+                    if (event.key == Key.DirectionLeft || event.key == Key.DirectionRight) {
+                        if (event.type == KeyEventType.KeyDown) {
+                            val repeat = event.nativeKeyEvent.repeatCount
+                            // Holding the key keeps seeking, but at a calmer pace.
+                            if (repeat == 0 || repeat % 5 == 0) {
+                                seek(if (event.key == Key.DirectionLeft) -SEEK_STEP_MS else SEEK_STEP_MS)
+                            }
+                        }
+                        true
+                    } else false
+                }
+                .focusable()
+                .pointerInput(Unit) {
+                    detectTapGestures(onTap = { offset ->
+                        val targetBehind = ((1f - offset.x / size.width).coerceIn(0f, 1f) * cap).toLong()
+                        seek(behindState - targetBehind)
+                    })
+                }
+                .pointerInput(Unit) {
+                    detectHorizontalDragGestures(
+                        onDragStart = { lastDragX = it.x },
+                        onDragEnd = {
+                            if (lastDragX >= 0f) {
+                                val targetBehind = ((1f - lastDragX / size.width).coerceIn(0f, 1f) * cap).toLong()
+                                seek(behindState - targetBehind)
+                                lastDragX = -1f
+                            }
+                        },
+                        onDragCancel = { lastDragX = -1f },
+                        onHorizontalDrag = { change, _ -> lastDragX = change.position.x }
+                    )
+                }
+        ) {
+            Canvas(Modifier.fillMaxSize()) {
+                val w = size.width
+                val cy = size.height / 2f
+                val th = 6.dp.toPx()
+                val radius = CornerRadius(th / 2f, th / 2f)
+                val a = availFrac * w
+                val k = frac * w
+                drawRoundRect(Color(0x33FFFFFF), Offset(0f, cy - th / 2f), Size(w, th), radius)
+                drawRoundRect(Color(0x66B66CFF), Offset(a, cy - th / 2f), Size(w - a, th), radius)
+                if (k > a) drawRoundRect(Color(0xFFA56BFF), Offset(a, cy - th / 2f), Size(k - a, th), radius)
+                if (focused) drawCircle(Color(0x66B66CFF), 16.dp.toPx(), Offset(k, cy))
+                drawCircle(Color.White, (if (focused) 10.dp else 7.dp).toPx(), Offset(k, cy))
+            }
+        }
+        Spacer(Modifier.width(12.dp))
+        Text(
+            if (atLive) "LIVE" else "-${fmtTime(behindMs)}",
+            color = if (atLive) Color(0xFFFF6B8A) else Color.White,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Bold
+        )
+    }
+}
+
+@Composable
+private fun LivePill(atLive: Boolean, onClick: () -> Unit) {
+    var focused by remember { mutableStateOf(false) }
+    Surface(
+        onClick = onClick,
+        modifier = Modifier.onFocusChanged { focused = it.hasFocus },
+        shape = RoundedCornerShape(24.dp),
+        color = when {
+            focused -> Color(0xFFA56BFF)
+            atLive -> Color(0xFFE5254B)
+            else -> Color(0xAA0C0F18)
+        },
+        border = androidx.compose.foundation.BorderStroke(
+            if (focused) 2.dp else 1.dp,
+            if (focused) Color.White else Color(0x44FFFFFF)
+        )
+    ) {
+        Row(
+            Modifier.padding(horizontal = 16.dp, vertical = 11.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(Modifier.size(8.dp).clip(CircleShape).background(Color.White))
+            Spacer(Modifier.width(8.dp))
+            Text(if (atLive) "LIVE" else "Go Live", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.ExtraBold)
         }
     }
 }
