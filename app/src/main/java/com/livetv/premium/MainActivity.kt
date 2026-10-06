@@ -4,6 +4,8 @@ import android.app.Activity
 import android.content.Context
 import android.os.Bundle
 import android.util.Log
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.text.KeyboardActions
@@ -113,6 +115,8 @@ data class Channel(
 
 private enum class Screen { HOME, ABOUT }
 
+private const val ABOUT_ID = "__about__"
+
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -193,6 +197,11 @@ private fun LiveTvApp() {
     var error by remember { mutableStateOf<String?>(null) }
     var selected by remember { mutableStateOf<Channel?>(null) }
     var screen by remember { mutableStateOf(Screen.HOME) }
+    // Remember where the user was on Home so Back returns to the exact same spot.
+    var query by remember { mutableStateOf("") }
+    val listState = rememberLazyListState()
+    var lastFocusedId by remember { mutableStateOf<String?>(null) }
+    val restoreFocus = remember { FocusRequester() }
     var showExit by remember { mutableStateOf(false) }
     var showSplash by remember { mutableStateOf(true) }
     val onlineState = rememberIsOnline()
@@ -227,6 +236,10 @@ private fun LiveTvApp() {
             wasOffline = false
             if (channels.isEmpty() || error != null) loadPlaylist()
         }
+    }
+
+    LaunchedEffect(selected) {
+        selected?.let { lastFocusedId = it.id }
     }
 
     BackHandler(enabled = selected != null) { selected = null }
@@ -279,8 +292,13 @@ private fun LiveTvApp() {
                         loading = loading,
                         error = error,
                         onRetry = { scope.launch { loadPlaylist() } },
-                        onChannel = { selected = it },
-                        onAbout = { screen = Screen.ABOUT }
+                        onChannel = { lastFocusedId = it.id; selected = it },
+                        onAbout = { lastFocusedId = ABOUT_ID; screen = Screen.ABOUT },
+                        query = query,
+                        onQuery = { query = it },
+                        listState = listState,
+                        restoreId = lastFocusedId,
+                        restoreFocus = restoreFocus
                     )
                 }
             }
@@ -308,15 +326,46 @@ private fun HomeScreen(
     error: String?,
     onRetry: () -> Unit,
     onChannel: (Channel) -> Unit,
-    onAbout: () -> Unit
+    onAbout: () -> Unit,
+    query: String,
+    onQuery: (String) -> Unit,
+    listState: LazyListState,
+    restoreId: String?,
+    restoreFocus: FocusRequester
 ) {
-    var query by remember { mutableStateOf("") }
     val grouped = remember(channels, query) {
         val q = query.trim().lowercase(Locale.US)
         channels
             .filter { q.isBlank() || it.name.lowercase(Locale.US).contains(q) || it.category.lowercase(Locale.US).contains(q) }
             .groupBy { it.category.ifBlank { "Live TV" } }
             .toSortedMap(String.CASE_INSENSITIVE_ORDER)
+    }
+
+    // On coming back (Back from player / About): scroll to and focus the item the user left from.
+    LaunchedEffect(Unit) {
+        if (restoreId != null && restoreId != ABOUT_ID) {
+            var index = 0
+            var found = -1
+            grouped.forEach { (_, list) ->
+                index += 1
+                val rows = list.chunked(7)
+                rows.forEachIndexed { r, row ->
+                    if (found < 0 && row.any { it.id == restoreId }) found = index + r
+                }
+                index += rows.size
+            }
+            val visible = listState.layoutInfo.visibleItemsInfo
+            if (found >= 0 && visible.isNotEmpty() && visible.none { it.index == found }) {
+                listState.scrollToItem(found)
+            }
+        }
+        if (restoreId != null) {
+            delay(120)
+            try {
+                restoreFocus.requestFocus()
+            } catch (_: Throwable) {
+            }
+        }
     }
 
     Box(
@@ -327,7 +376,13 @@ private fun HomeScreen(
         )
     ) {
         Column(Modifier.fillMaxSize().padding(horizontal = 34.dp, vertical = 22.dp)) {
-            TopBar(query, onQuery = { query = it }, onAbout = onAbout, loading = loading)
+            TopBar(
+                query,
+                onQuery = onQuery,
+                onAbout = onAbout,
+                loading = loading,
+                aboutFocus = if (restoreId == ABOUT_ID) restoreFocus else null
+            )
             Spacer(Modifier.height(22.dp))
 
             when {
@@ -336,6 +391,7 @@ private fun HomeScreen(
                 grouped.isEmpty() -> ErrorState("No matching channels found.", onRetry)
                 else -> {
                     LazyColumn(
+                        state = listState,
                         verticalArrangement = Arrangement.spacedBy(14.dp),
                         contentPadding = PaddingValues(bottom = 34.dp)
                     ) {
@@ -345,7 +401,7 @@ private fun HomeScreen(
                             }
                             val rows = list.chunked(7)
                             itemsIndexed(rows, key = { i, _ -> "row_${category}_$i" }) { i, row ->
-                                ChannelRow(row, onChannel, i)
+                                ChannelRow(row, onChannel, i, restoreId, restoreFocus)
                             }
                         }
                     }
@@ -360,7 +416,8 @@ private fun TopBar(
     query: String,
     onQuery: (String) -> Unit,
     onAbout: () -> Unit,
-    loading: Boolean
+    loading: Boolean,
+    aboutFocus: FocusRequester? = null
 ) {
     val keyboard = LocalSoftwareKeyboardController.current
     val focusManager = LocalFocusManager.current
@@ -412,7 +469,7 @@ private fun TopBar(
             )
         )
         Spacer(Modifier.width(14.dp))
-        HeaderButton(Icons.Default.Info, "About", onAbout)
+        HeaderButton(Icons.Default.Info, "About", onAbout, aboutFocus)
     }
 }
 
@@ -455,10 +512,21 @@ private fun CategoryRow(category: String, count: Int) {
 }
 
 @Composable
-private fun ChannelRow(row: List<Channel>, onChannel: (Channel) -> Unit, rowIndex: Int) {
+private fun ChannelRow(
+    row: List<Channel>,
+    onChannel: (Channel) -> Unit,
+    rowIndex: Int,
+    restoreId: String?,
+    restoreFocus: FocusRequester
+) {
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
         row.forEachIndexed { index, channel ->
-            ChannelCard(channel, onChannel, Modifier.weight(1f), rowIndex * 7 + index)
+            ChannelCard(
+                channel,
+                onChannel,
+                Modifier.weight(1f).then(if (channel.id == restoreId) Modifier.focusRequester(restoreFocus) else Modifier),
+                rowIndex * 7 + index
+            )
         }
         repeat(7 - row.size) { Spacer(Modifier.weight(1f)) }
     }
