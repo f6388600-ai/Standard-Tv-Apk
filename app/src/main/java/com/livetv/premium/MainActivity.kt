@@ -5,6 +5,8 @@ import android.content.Context
 import android.os.Bundle
 import android.util.Log
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.Crossfade
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
@@ -182,6 +184,9 @@ private fun LiveTvApp() {
     var screen by remember { mutableStateOf(Screen.HOME) }
     var showExit by remember { mutableStateOf(false) }
     var showSplash by remember { mutableStateOf(true) }
+    val onlineState = rememberIsOnline()
+    val offline = !onlineState.value && !showSplash
+    var wasOffline by remember { mutableStateOf(false) }
 
     suspend fun loadPlaylist() {
         loading = true
@@ -203,6 +208,16 @@ private fun LiveTvApp() {
         showSplash = false
     }
 
+    // When the connection comes back, reload the playlist if it is missing.
+    LaunchedEffect(offline) {
+        if (offline) {
+            wasOffline = true
+        } else if (wasOffline) {
+            wasOffline = false
+            if (channels.isEmpty() || error != null) loadPlaylist()
+        }
+    }
+
     BackHandler(enabled = selected != null) { selected = null }
     BackHandler(enabled = selected == null && screen != Screen.HOME) { screen = Screen.HOME }
     BackHandler(enabled = selected == null && screen == Screen.HOME) { showExit = true }
@@ -214,37 +229,49 @@ private fun LiveTvApp() {
             primary = Color(0xFFA56BFF)
         )
     ) {
-        AnimatedContent(
-            targetState = selected,
-            transitionSpec = { fadeIn(tween(220)) togetherWith fadeOut(tween(180)) },
-            label = "screen"
-        ) { channel ->
-            if (channel != null) {
-                val currentIndex = channels.indexOfFirst { it.id == channel.id }
-                PlayerScreen(
-                    channel = channel,
-                    nextChannel = if (currentIndex >= 0) channels.getOrNull(currentIndex + 1) else null,
-                    onBack = { selected = null },
-                    onPrevious = {
-                        val index = channels.indexOfFirst { it.id == channel.id }
-                        if (index > 0) selected = channels[index - 1]
-                    },
-                    onNext = {
-                        val index = channels.indexOfFirst { it.id == channel.id }
-                        if (index >= 0 && index < channels.lastIndex) selected = channels[index + 1]
+        Crossfade(targetState = offline, animationSpec = tween(350), label = "network") { isOffline ->
+            if (isOffline) {
+                NoInternetScreen(
+                    onRecheck = {
+                        val ok = NetworkMonitor.isOnline(context)
+                        onlineState.value = ok
+                        ok
                     }
                 )
-            } else if (screen == Screen.ABOUT) {
-                AboutScreen(onBack = { screen = Screen.HOME })
             } else {
-                HomeScreen(
-                    channels = channels,
-                    loading = loading,
-                    error = error,
-                    onRetry = { scope.launch { loadPlaylist() } },
-                    onChannel = { selected = it },
-                    onAbout = { screen = Screen.ABOUT }
-                )
+            AnimatedContent(
+                targetState = selected,
+                transitionSpec = { fadeIn(tween(220)) togetherWith fadeOut(tween(180)) },
+                label = "screen"
+            ) { channel ->
+                if (channel != null) {
+                    val currentIndex = channels.indexOfFirst { it.id == channel.id }
+                    PlayerScreen(
+                        channel = channel,
+                        nextChannel = if (currentIndex >= 0) channels.getOrNull(currentIndex + 1) else null,
+                        onBack = { selected = null },
+                        onPrevious = {
+                            val index = channels.indexOfFirst { it.id == channel.id }
+                            if (index > 0) selected = channels[index - 1]
+                        },
+                        onNext = {
+                            val index = channels.indexOfFirst { it.id == channel.id }
+                            if (index >= 0 && index < channels.lastIndex) selected = channels[index + 1]
+                        }
+                    )
+                } else if (screen == Screen.ABOUT) {
+                    AboutScreen(onBack = { screen = Screen.HOME })
+                } else {
+                    HomeScreen(
+                        channels = channels,
+                        loading = loading,
+                        error = error,
+                        onRetry = { scope.launch { loadPlaylist() } },
+                        onChannel = { selected = it },
+                        onAbout = { screen = Screen.ABOUT }
+                    )
+                }
+            }
             }
         }
 
@@ -950,6 +977,137 @@ private fun CrashScreen(trace: String, onContinue: () -> Unit) {
             modifier = Modifier.weight(1f).verticalScroll(rememberScrollState())
         )
         Button(onClick = onContinue) { Text("Continue") }
+    }
+}
+
+@Composable
+private fun NoInternetScreen(onRecheck: () -> Boolean) {
+    val scope = rememberCoroutineScope()
+    var checking by remember { mutableStateOf(false) }
+    var hint by remember { mutableStateOf("") }
+    val focus = remember { FocusRequester() }
+    LaunchedEffect(Unit) {
+        try {
+            focus.requestFocus()
+        } catch (_: Throwable) {
+        }
+    }
+
+    val transition = rememberInfiniteTransition(label = "offline")
+    val wave by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(tween(2400, easing = LinearEasing)),
+        label = "wave"
+    )
+    val bob by transition.animateFloat(
+        initialValue = -6f,
+        targetValue = 6f,
+        animationSpec = infiniteRepeatable(tween(1800), RepeatMode.Reverse),
+        label = "bob"
+    )
+    val dotAlpha by transition.animateFloat(
+        initialValue = 0.3f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(tween(800), RepeatMode.Reverse),
+        label = "dot"
+    )
+
+    Box(
+        Modifier
+            .fillMaxSize()
+            .background(Brush.verticalGradient(listOf(Color(0xFF14092B), Color(0xFF07080D), Color(0xFF05060A)))),
+        contentAlignment = Alignment.Center
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(horizontal = 48.dp)) {
+            Box(Modifier.size(240.dp), contentAlignment = Alignment.Center) {
+                Canvas(Modifier.fillMaxSize()) {
+                    for (i in 0..2) {
+                        val p = (wave + i / 3f) % 1f
+                        drawCircle(
+                            color = Color(0xFFB66CFF).copy(alpha = (1f - p) * 0.4f),
+                            radius = size.minDimension / 2f * (0.4f + 0.6f * p),
+                            style = Stroke(2.dp.toPx())
+                        )
+                    }
+                }
+                Box(
+                    Modifier
+                        .offset(y = bob.dp)
+                        .size(104.dp)
+                        .clip(CircleShape)
+                        .background(Brush.linearGradient(listOf(Color(0xFF3A1D6E), Color(0xFF1B1235))))
+                        .border(1.5.dp, Color(0x66B66CFF), CircleShape),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(Icons.Default.WifiOff, null, tint = Color(0xFFD9B8FF), modifier = Modifier.size(50.dp))
+                }
+            }
+            Spacer(Modifier.width(44.dp))
+            Column(Modifier.widthIn(max = 440.dp)) {
+                Text("CONNECTION LOST", color = Color(0xFFB982FF), fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(6.dp))
+                Text("No Internet Connection", color = Color.White, fontSize = 30.sp, fontWeight = FontWeight.ExtraBold)
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "We can't reach the network. We'll reconnect automatically as soon as you're back online.",
+                    color = Color(0xFFC4CAD6),
+                    fontSize = 15.sp
+                )
+                Spacer(Modifier.height(18.dp))
+                Surface(
+                    shape = RoundedCornerShape(16.dp),
+                    color = Color(0xFF121622),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF343B4E))
+                ) {
+                    Column(Modifier.padding(horizontal = 18.dp, vertical = 14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        listOf("Make sure Wi-Fi or mobile data is turned on", "Restart your router if other devices are offline too").forEach { tip ->
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Box(Modifier.size(6.dp).clip(CircleShape).background(Color(0xFFB66CFF)))
+                                Spacer(Modifier.width(10.dp))
+                                Text(tip, color = Color(0xFFE6E8EE), fontSize = 13.sp)
+                            }
+                        }
+                    }
+                }
+                Spacer(Modifier.height(22.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Button(
+                        onClick = {
+                            if (!checking) {
+                                checking = true
+                                hint = ""
+                                scope.launch {
+                                    delay(900)
+                                    val ok = onRecheck()
+                                    checking = false
+                                    if (!ok) hint = "Still offline. Please check your connection."
+                                }
+                            }
+                        },
+                        shape = RoundedCornerShape(14.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFA56BFF), contentColor = Color.White),
+                        modifier = Modifier.focusRequester(focus)
+                    ) {
+                        if (checking) {
+                            CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp, color = Color.White)
+                        } else {
+                            Icon(Icons.Default.Refresh, null, modifier = Modifier.size(18.dp))
+                        }
+                        Spacer(Modifier.width(8.dp))
+                        Text(if (checking) "Checking…" else "Retry", fontWeight = FontWeight.Bold)
+                    }
+                    Spacer(Modifier.width(18.dp))
+                    Box(Modifier.size(8.dp).clip(CircleShape).background(Color(0xFFB66CFF).copy(alpha = dotAlpha)))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Waiting for connection…", color = Color(0xFF9FA7B8), fontSize = 13.sp)
+                }
+                if (hint.isNotEmpty()) {
+                    Spacer(Modifier.height(10.dp))
+                    Text(hint, color = Color(0xFFFF8A80), fontSize = 13.sp)
+                }
+            }
+        }
     }
 }
 
