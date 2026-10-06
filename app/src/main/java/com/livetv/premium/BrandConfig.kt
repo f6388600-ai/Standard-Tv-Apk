@@ -2,7 +2,7 @@ package com.livetv.premium
 
 object BrandConfig {
     const val APP_NAME = "Hasu Live Tv"
-    const val REMOTE_LOGO_URL = ""
+    const val REMOTE_LOGO_URL = "https://i.ibb.co/Cp4YwqZc/1dd756e8adaf.jpg"
 
     // Playlist 1
     const val PLAYLIST_URL =
