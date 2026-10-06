@@ -7,6 +7,8 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
@@ -60,9 +62,14 @@ object PlaylistRepository {
 
     private suspend fun parseAndSelectLive(text: String): List<Channel> = coroutineScope {
         val candidates = parseCandidates(text)
+        val gate = Semaphore(16)
         candidates.map { candidate ->
             async(Dispatchers.IO) {
-                val url = chooseWorkingUrl(candidate.urls)
+                val url = try {
+                    gate.withPermit { chooseWorkingUrl(candidate.urls) }
+                } catch (e: Exception) {
+                    candidate.urls.firstOrNull().orEmpty()
+                }
                 if (url.isBlank()) null else Channel(
                     id = candidate.id,
                     name = candidate.name,
