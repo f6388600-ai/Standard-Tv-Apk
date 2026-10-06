@@ -1,7 +1,6 @@
 package com.livetv.premium
 
 import android.app.Activity
-import android.content.Context
 import android.os.Bundle
 import androidx.activity.compose.BackHandler
 import androidx.activity.ComponentActivity
@@ -51,11 +50,6 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
-import androidx.work.Constraints
-import androidx.work.NetworkType
-import androidx.work.ExistingPeriodicWorkPolicy
-import androidx.work.PeriodicWorkRequestBuilder
-import androidx.work.WorkManager
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
@@ -68,7 +62,6 @@ import kotlinx.coroutines.launch
 import java.text.DateFormat
 import java.util.Date
 import java.util.Locale
-import java.util.concurrent.TimeUnit
 
 
 data class Channel(
@@ -84,26 +77,7 @@ private enum class Screen { HOME, ABOUT }
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        schedulePlaylistSync(this)
         setContent { LiveTvApp() }
-    }
-
-    private fun schedulePlaylistSync(context: Context) {
-        val request = PeriodicWorkRequestBuilder<PlaylistSyncWorker>(
-            1, TimeUnit.HOURS
-        )
-            .setConstraints(
-                Constraints.Builder()
-                    .setRequiredNetworkType(NetworkType.CONNECTED)
-                    .build()
-            )
-            .build()
-
-        WorkManager.getInstance(context).enqueueUniquePeriodicWork(
-            "hasu_live_tv_playlist_sync",
-            ExistingPeriodicWorkPolicy.KEEP,
-            request
-        )
     }
 }
 
@@ -449,7 +423,7 @@ private fun PlayerScreen(channel: Channel, onBack: () -> Unit, onPrevious: () ->
                     controllerAutoShow = true
                     controllerHideOnTouch = true
                     setPlayer(player)
-                    setControllerVisibilityListener { visibility ->
+                    setControllerVisibilityListener { visibility: Int ->
                         showBackButton = visibility == android.view.View.VISIBLE
                     }
                     requestFocus()
