@@ -2,7 +2,13 @@ package com.livetv.premium
 
 import android.content.Context
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
@@ -12,29 +18,58 @@ import java.util.Locale
 object PlaylistRepository {
     private const val PREFS = "playlist_cache"
     private const val KEY_DATA = "channels_json"
+    private const val KEY_SYNC = "last_sync"
+
+    fun lastSync(context: Context): Long =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getLong(KEY_SYNC, 0L)
 
     suspend fun load(context: Context): List<Channel> = withContext(Dispatchers.IO) {
         val cached = readCache(context)
-        return@withContext try {
-            val connection = URL(BrandConfig.PLAYLIST_URL).openConnection() as HttpURLConnection
-            connection.connectTimeout = 12_000
-            connection.readTimeout = 20_000
-            connection.requestMethod = "GET"
-            connection.setRequestProperty("User-Agent", "LiveTVPremium/1.0")
-            connection.inputStream.bufferedReader().use { reader ->
-                val text = reader.readText()
-                val parsed = parseM3u(text)
-                if (parsed.isNotEmpty()) saveCache(context, parsed)
-                if (parsed.isNotEmpty()) parsed else cached
-            }.also { connection.disconnect() }
+        val lastSync = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getLong(KEY_SYNC, 0L)
+
+        if (cached.isNotEmpty() && System.currentTimeMillis() - lastSync < BrandConfig.REFRESH_INTERVAL_MS) {
+            return@withContext cached
+        }
+
+        try {
+            val text = fetchPlaylist()
+            val parsed = parseAndSelectLive(text)
+            if (parsed.isNotEmpty()) {
+                saveCache(context, parsed)
+                return@withContext parsed
+            }
+            cached
         } catch (_: Exception) {
             cached
         }
     }
 
-    private fun parseM3u(text: String): List<Channel> {
+    private fun fetchPlaylist(): String {
+        val connection = URL(BrandConfig.PLAYLIST_URL).openConnection() as HttpURLConnection
+        return try {
+            connection.connectTimeout = 7_000
+            connection.readTimeout = 12_000
+            connection.requestMethod = "GET"
+            connection.setRequestProperty("User-Agent", "HasuLiveTv/1.0")
+            connection.inputStream.bufferedReader().use { it.readText() }
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    private suspend fun parseAndSelectLive(text: String): List<Channel> = coroutineScope {
+        val candidates = parseCandidates(text)
+        candidates.map { candidate ->
+            async(Dispatchers.IO) {
+                candidate.copy(url = chooseWorkingUrl(candidate.urls))
+            }
+        }.awaitAll().filter { it.url.isNotBlank() }
+    }
+
+    private fun parseCandidates(text: String): List<ChannelCandidate> {
         val lines = text.lineSequence().map { it.trim() }.filter { it.isNotBlank() }.toList()
-        val output = LinkedHashMap<String, Channel>()
+        val output = LinkedHashMap<String, MutableChannel>()
         var pendingInfo: String? = null
 
         for (line in lines) {
@@ -44,7 +79,7 @@ object PlaylistRepository {
             }
             if (line.startsWith("#")) continue
             val info = pendingInfo ?: continue
-            val url = line
+            val url = line.trim()
             val name = info.substringAfterLast(",", "Live Channel").trim().ifBlank { "Live Channel" }
             val tvgId = attr(info, "tvg-id")
             val tvgName = attr(info, "tvg-name")
@@ -53,29 +88,60 @@ object PlaylistRepository {
             val finalName = tvgName.ifBlank { name }
             val key = normalize(if (tvgId.isNotBlank()) tvgId else finalName)
 
-            if (key.isNotBlank() && !output.containsKey(key)) {
-                output[key] = Channel(
-                    id = key,
-                    name = finalName,
-                    url = url,
-                    logo = logo,
-                    category = group
-                )
+            if (key.isNotBlank()) {
+                val current = output.getOrPut(key) {
+                    MutableChannel(key, finalName, logo, group, mutableListOf())
+                }
+                if (current.logo.isBlank() && logo.isNotBlank()) current.logo = logo
+                if (current.category == "Live TV" && group.isNotBlank()) current.category = group
+                if (url.isNotBlank() && !current.urls.contains(url)) current.urls += url
             }
             pendingInfo = null
         }
-        return output.values.toList()
+
+        return output.values.map {
+            ChannelCandidate(it.id, it.name, it.logo, it.category, it.urls.toList())
+        }
+    }
+
+    private suspend fun chooseWorkingUrl(urls: List<String>): String = coroutineScope {
+        if (urls.isEmpty()) return@coroutineScope ""
+        if (urls.size == 1) return@coroutineScope urls.first()
+
+        val winner = CompletableDeferred<String?>()
+        val jobs = urls.map { url ->
+            launch(Dispatchers.IO) {
+                if (probeUrl(url)) winner.complete(url)
+            }
+        }
+        val result = withTimeoutOrNull(3_500L) { winner.await() }
+        jobs.forEach { it.cancel() }
+        result ?: urls.first()
+    }
+
+    private fun probeUrl(url: String): Boolean {
+        return try {
+            val connection = URL(url).openConnection() as HttpURLConnection
+            connection.connectTimeout = 2_000
+            connection.readTimeout = 2_500
+            connection.requestMethod = "HEAD"
+            connection.instanceFollowRedirects = true
+            connection.setRequestProperty("User-Agent", "HasuLiveTv/1.0")
+            val code = connection.responseCode
+            connection.disconnect()
+            code in 200..399
+        } catch (_: Exception) {
+            false
+        }
     }
 
     private fun attr(line: String, key: String): String {
-        val regex = Regex("""$key\s*=\s*["']([^"']*)["']""", RegexOption.IGNORE_CASE)
+        val regex = Regex("""$key\s*=\s*[\"']([^\"']*)[\"']""", RegexOption.IGNORE_CASE)
         return regex.find(line)?.groupValues?.getOrNull(1)?.trim().orEmpty()
     }
 
     private fun normalize(value: String): String =
-        value.lowercase(Locale.US)
-            .replace(Regex("""[^a-z0-9]+"""), "")
-            .trim()
+        value.lowercase(Locale.US).replace(Regex("""[^a-z0-9]+"""), "").trim()
 
     private fun readCache(context: Context): List<Channel> {
         return try {
@@ -85,15 +151,7 @@ object PlaylistRepository {
             buildList {
                 for (i in 0 until array.length()) {
                     val o = array.getJSONObject(i)
-                    add(
-                        Channel(
-                            id = o.getString("id"),
-                            name = o.getString("name"),
-                            url = o.getString("url"),
-                            logo = o.optString("logo"),
-                            category = o.optString("category", "Live TV")
-                        )
-                    )
+                    add(Channel(o.getString("id"), o.getString("name"), o.getString("url"), o.optString("logo"), o.optString("category", "Live TV")))
                 }
             }
         } catch (_: Exception) {
@@ -104,19 +162,33 @@ object PlaylistRepository {
     private fun saveCache(context: Context, channels: List<Channel>) {
         val array = JSONArray()
         channels.forEach {
-            array.put(
-                JSONObject().apply {
-                    put("id", it.id)
-                    put("name", it.name)
-                    put("url", it.url)
-                    put("logo", it.logo)
-                    put("category", it.category)
-                }
-            )
+            array.put(JSONObject().apply {
+                put("id", it.id)
+                put("name", it.name)
+                put("url", it.url)
+                put("logo", it.logo)
+                put("category", it.category)
+            })
         }
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .edit()
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
             .putString(KEY_DATA, array.toString())
+            .putLong(KEY_SYNC, System.currentTimeMillis())
             .apply()
     }
+
+    private data class ChannelCandidate(
+        val id: String,
+        val name: String,
+        val logo: String,
+        val category: String,
+        val urls: List<String>
+    )
+
+    private data class MutableChannel(
+        val id: String,
+        val name: String,
+        var logo: String,
+        var category: String,
+        val urls: MutableList<String>
+    )
 }

@@ -2,11 +2,10 @@ package com.livetv.premium
 
 import android.app.Activity
 import android.os.Bundle
+import androidx.activity.BackHandler
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
@@ -17,11 +16,11 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -33,30 +32,32 @@ import androidx.compose.ui.draw.scale
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
-import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
+import androidx.media3.common.PlaybackException
+import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
 import coil3.compose.AsyncImage
-import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import org.json.JSONArray
-import org.json.JSONObject
-import java.net.HttpURLConnection
-import java.net.URL
+import java.text.DateFormat
+import java.util.Date
 import java.util.Locale
+
 
 data class Channel(
     val id: String,
@@ -65,6 +66,8 @@ data class Channel(
     val logo: String,
     val category: String
 )
+
+private enum class Screen { HOME, ABOUT }
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -82,7 +85,9 @@ private fun LiveTvApp() {
     var loading by remember { mutableStateOf(true) }
     var error by remember { mutableStateOf<String?>(null) }
     var selected by remember { mutableStateOf<Channel?>(null) }
+    var screen by remember { mutableStateOf(Screen.HOME) }
     var showExit by remember { mutableStateOf(false) }
+    var showSplash by remember { mutableStateOf(true) }
 
     suspend fun loadPlaylist() {
         loading = true
@@ -99,22 +104,20 @@ private fun LiveTvApp() {
     }
 
     LaunchedEffect(Unit) {
-        loadPlaylist()
+        launch { loadPlaylist() }
+        delay(1200)
+        showSplash = false
     }
 
-    BackHandler(enabled = selected != null) {
-        selected = null
-    }
-
-    BackHandler(enabled = selected == null) {
-        showExit = true
-    }
+    BackHandler(enabled = selected != null) { selected = null }
+    BackHandler(enabled = selected == null && screen != Screen.HOME) { screen = Screen.HOME }
+    BackHandler(enabled = selected == null && screen == Screen.HOME) { showExit = true }
 
     MaterialTheme(
         colorScheme = darkColorScheme(
-            background = Color(0xFF07090D),
-            surface = Color(0xFF10141C),
-            primary = Color.White
+            background = Color(0xFF06070C),
+            surface = Color(0xFF111521),
+            primary = Color(0xFFA56BFF)
         )
     ) {
         AnimatedContent(
@@ -122,17 +125,10 @@ private fun LiveTvApp() {
             transitionSpec = { fadeIn(tween(220)) togetherWith fadeOut(tween(180)) },
             label = "screen"
         ) { channel ->
-            if (channel == null) {
-                HomeScreen(
-                    channels = channels,
-                    loading = loading,
-                    error = error,
-                    onRetry = { scope.launch { loadPlaylist() } },
-                    onChannel = { selected = it }
-                )
-            } else {
+            if (channel != null) {
                 PlayerScreen(
                     channel = channel,
+                    onBack = { selected = null },
                     onPrevious = {
                         val index = channels.indexOfFirst { it.id == channel.id }
                         if (index > 0) selected = channels[index - 1]
@@ -142,6 +138,17 @@ private fun LiveTvApp() {
                         if (index >= 0 && index < channels.lastIndex) selected = channels[index + 1]
                     }
                 )
+            } else if (screen == Screen.ABOUT) {
+                AboutScreen(onBack = { screen = Screen.HOME })
+            } else {
+                HomeScreen(
+                    channels = channels,
+                    loading = loading,
+                    error = error,
+                    onRetry = { scope.launch { loadPlaylist() } },
+                    onChannel = { selected = it },
+                    onAbout = { screen = Screen.ABOUT }
+                )
             }
         }
 
@@ -150,14 +157,12 @@ private fun LiveTvApp() {
                 onDismissRequest = { showExit = false },
                 title = { Text("Exit Live TV?") },
                 text = { Text("Are you sure you want to close the app?") },
-                confirmButton = {
-                    TextButton(onClick = { activity.finish() }) { Text("Exit") }
-                },
-                dismissButton = {
-                    TextButton(onClick = { showExit = false }) { Text("Cancel") }
-                }
+                confirmButton = { TextButton(onClick = { activity.finish() }) { Text("Exit") } },
+                dismissButton = { TextButton(onClick = { showExit = false }) { Text("Cancel") } }
             )
         }
+
+        if (showSplash) SplashScreen()
     }
 }
 
@@ -167,93 +172,44 @@ private fun HomeScreen(
     loading: Boolean,
     error: String?,
     onRetry: () -> Unit,
-    onChannel: (Channel) -> Unit
+    onChannel: (Channel) -> Unit,
+    onAbout: () -> Unit
 ) {
-    val grouped = remember(channels) {
-        channels.groupBy { it.category.ifBlank { "Live TV" } }
+    var query by remember { mutableStateOf("") }
+    val grouped = remember(channels, query) {
+        val q = query.trim().lowercase(Locale.US)
+        channels
+            .filter { q.isBlank() || it.name.lowercase(Locale.US).contains(q) || it.category.lowercase(Locale.US).contains(q) }
+            .groupBy { it.category.ifBlank { "Live TV" } }
             .toSortedMap(String.CASE_INSENSITIVE_ORDER)
     }
 
     Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(
-                Brush.verticalGradient(
-                    listOf(Color(0xFF080B12), Color(0xFF050609))
-                )
+        Modifier.fillMaxSize().background(
+            Brush.verticalGradient(
+                listOf(Color(0xFF100B20), Color(0xFF080B14), Color(0xFF05060A))
             )
+        )
     ) {
-        Column(
-            Modifier
-                .fillMaxSize()
-                .padding(horizontal = 42.dp, vertical = 28.dp)
-        ) {
-            Row(
-                Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Logo()
-                Spacer(Modifier.width(16.dp))
-                Column {
-                    Text(
-                        BrandConfig.APP_NAME,
-                        fontSize = 30.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Text(
-                        if (loading) "Loading live channels…"
-                        else "LIVE • FAST • PREMIUM",
-                        color = Color(0xFFA56BFF),
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Medium
-                    )
-                }
-                Spacer(Modifier.weight(1f))
-                Surface(
-                    shape = RoundedCornerShape(18.dp),
-                    color = Color(0xFF21114A)
-                ) {
-                    Text(
-                        "LIVE",
-                        color = Color(0xFFB985FF),
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier.padding(horizontal = 18.dp, vertical = 12.dp)
-                    )
-                }
-            }
-
-            Spacer(Modifier.height(28.dp))
+        Column(Modifier.fillMaxSize().padding(horizontal = 34.dp, vertical = 22.dp)) {
+            TopBar(query, onQuery = { query = it }, onAbout = onAbout, loading = loading)
+            Spacer(Modifier.height(22.dp))
 
             when {
                 loading && channels.isEmpty() -> LoadingRows()
                 error != null && channels.isEmpty() -> ErrorState(error, onRetry)
-                grouped.isEmpty() -> ErrorState("No channels available.", onRetry)
+                grouped.isEmpty() -> ErrorState("No matching channels found.", onRetry)
                 else -> {
                     LazyColumn(
-                        state = rememberLazyListState(),
-                        verticalArrangement = Arrangement.spacedBy(30.dp),
-                        contentPadding = PaddingValues(bottom = 36.dp)
+                        verticalArrangement = Arrangement.spacedBy(28.dp),
+                        contentPadding = PaddingValues(bottom = 34.dp)
                     ) {
                         grouped.forEach { (category, list) ->
                             item(key = "category_$category") {
-                                CategoryRow(
-                                    category = category,
-                                    count = list.size
-                                )
+                                CategoryRow(category, list.size)
                             }
                             item(key = "channels_$category") {
-                                LazyRow(
-                                    horizontalArrangement = Arrangement.spacedBy(22.dp),
-                                    contentPadding = PaddingValues(horizontal = 4.dp, vertical = 8.dp)
-                                ) {
-                                    itemsIndexed(
-                                        list,
-                                        key = { _, channel -> channel.id }
-                                    ) { _, channel ->
-                                        ChannelCard(channel, onChannel)
-                                    }
-                                }
+                                ChannelGrid7(list, onChannel)
                             }
                         }
                     }
@@ -264,154 +220,184 @@ private fun HomeScreen(
 }
 
 @Composable
-private fun CategoryRow(category: String, count: Int) {
-    Row(
-        Modifier.fillMaxWidth(),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Box(
-            Modifier
-                .width(6.dp)
-                .height(30.dp)
-                .clip(RoundedCornerShape(4.dp))
-                .background(Color(0xFF8A45FF))
-        )
-        Spacer(Modifier.width(12.dp))
-        Text(
-            category.uppercase(Locale.US),
-            fontSize = 22.sp,
-            fontWeight = FontWeight.Bold,
-            color = Color(0xFFF3F4F7)
-        )
+private fun TopBar(
+    query: String,
+    onQuery: (String) -> Unit,
+    onAbout: () -> Unit,
+    loading: Boolean
+) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Logo(Modifier.size(62.dp))
+        Spacer(Modifier.width(14.dp))
+        Column(Modifier.widthIn(min = 210.dp, max = 300.dp)) {
+            Text("Hasu Live Tv", fontSize = 28.sp, fontWeight = FontWeight.ExtraBold, color = Color.White)
+            Text(
+                if (loading) "Syncing live channels…" else "LIVE • FAST • PREMIUM",
+                color = Color(0xFFB982FF), fontSize = 12.sp, fontWeight = FontWeight.Bold
+            )
+        }
         Spacer(Modifier.weight(1f))
-        Text(
-            count.toString(),
-            color = Color(0xFF9EA5B2),
-            fontSize = 15.sp
+        OutlinedTextField(
+            value = query,
+            onValueChange = onQuery,
+            singleLine = true,
+            placeholder = { Text("Search channels", color = Color(0xFF8D94A5)) },
+            leadingIcon = { Icon(Icons.Default.Search, contentDescription = "Search", tint = Color(0xFFB982FF)) },
+            trailingIcon = {
+                if (query.isNotEmpty()) {
+                    IconButton(onClick = { onQuery("") }) { Icon(Icons.Default.Close, "Clear") }
+                }
+            },
+            modifier = Modifier
+                .width(370.dp)
+                .focusable()
+                .onPreviewKeyEvent { event ->
+                    event.type == KeyEventType.KeyUp && event.key == Key.Enter
+                },
+            shape = RoundedCornerShape(18.dp),
+            colors = OutlinedTextFieldDefaults.colors(
+                focusedBorderColor = Color(0xFFA56BFF),
+                unfocusedBorderColor = Color(0xFF353B4C),
+                focusedContainerColor = Color(0x221D1634),
+                unfocusedContainerColor = Color(0x161A1F2B),
+                focusedTextColor = Color.White,
+                unfocusedTextColor = Color.White,
+                cursorColor = Color(0xFFA56BFF)
+            )
         )
-        Spacer(Modifier.width(12.dp))
-        Text(
-            "See More",
-            color = Color(0xFFA56BFF),
-            fontSize = 15.sp,
-            fontWeight = FontWeight.Medium
-        )
+        Spacer(Modifier.width(14.dp))
+        HeaderButton(Icons.Default.Info, "About", onAbout)
     }
 }
 
 @Composable
-private fun ChannelCard(channel: Channel, onClick: (Channel) -> Unit) {
+private fun HeaderButton(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, onClick: () -> Unit) {
     var focused by remember { mutableStateOf(false) }
-    val scale by animateFloatAsState(
-        targetValue = if (focused) 1.07f else 1f,
-        animationSpec = tween(150),
-        label = "focusScale"
-    )
-
-    Column(
+    Surface(
+        onClick = onClick,
         modifier = Modifier
-            .width(220.dp)
-            .scale(scale)
-            .clip(RoundedCornerShape(18.dp))
-            .background(Color(0xFFF7F7F8))
-            .then(
-                if (focused) Modifier.border(
-                    3.dp,
-                    Color(0xFF8A45FF),
-                    RoundedCornerShape(18.dp)
-                ) else Modifier.border(
-                    1.dp,
-                    Color(0xFF2A3140),
-                    RoundedCornerShape(18.dp)
-                )
-            )
+            .size(64.dp)
             .onFocusChanged { focused = it.isFocused }
             .focusable()
-            .onPreviewKeyEvent {
-                if (it.type == KeyEventType.KeyUp &&
-                    (it.key == Key.Enter || it.key == Key.DirectionCenter)
-                ) {
-                    onClick(channel)
-                    true
-                } else false
-            }
-            .padding(10.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
+            .then(if (focused) Modifier.border(2.dp, Color(0xFFA56BFF), RoundedCornerShape(18.dp)) else Modifier),
+        shape = RoundedCornerShape(18.dp),
+        color = if (focused) Color(0xFF2B1850) else Color(0xFF151A27)
     ) {
-        Box(
-            Modifier
-                .fillMaxWidth()
-                .height(118.dp),
-            contentAlignment = Alignment.Center
-        ) {
-            if (channel.logo.isNotBlank()) {
-                AsyncImage(
-                    model = channel.logo,
-                    contentDescription = channel.name,
-                    contentScale = ContentScale.Fit,
-                    modifier = Modifier.fillMaxSize(0.78f)
-                )
-            } else {
-                Icon(
-                    Icons.Default.Tv,
-                    contentDescription = null,
-                    tint = Color(0xFF687080),
-                    modifier = Modifier.size(48.dp)
-                )
-            }
-
-            Box(
-                Modifier
-                    .align(Alignment.TopEnd)
-                    .clip(RoundedCornerShape(7.dp))
-                    .background(Color(0xFFE9E9EC))
-                    .padding(horizontal = 7.dp, vertical = 4.dp)
-            ) {
-                Icon(
-                    Icons.Default.StarBorder,
-                    contentDescription = "Favorite",
-                    tint = Color(0xFF555B66),
-                    modifier = Modifier.size(17.dp)
-                )
-            }
+        Box(contentAlignment = Alignment.Center) {
+            Icon(icon, label, tint = Color.White, modifier = Modifier.size(27.dp))
         }
-
-        Spacer(Modifier.height(4.dp))
-        Text(
-            channel.name,
-            color = Color(0xFF171A21),
-            fontSize = 15.sp,
-            fontWeight = FontWeight.SemiBold,
-            maxLines = 1,
-            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-            modifier = Modifier.fillMaxWidth(),
-            textAlign = androidx.compose.ui.text.style.TextAlign.Center
-        )
-        Spacer(Modifier.height(6.dp))
     }
 }
 
 @Composable
-private fun PlayerScreen(
-    channel: Channel,
-    onPrevious: () -> Unit,
-    onNext: () -> Unit
-) {
+private fun CategoryRow(category: String, count: Int) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Box(
+            Modifier.width(6.dp).height(30.dp).clip(RoundedCornerShape(4.dp))
+                .background(Brush.verticalGradient(listOf(Color(0xFFD36BFF), Color(0xFF6C5CFF))))
+        )
+        Spacer(Modifier.width(12.dp))
+        Text(category.uppercase(Locale.US), fontSize = 22.sp, fontWeight = FontWeight.ExtraBold, color = Color.White)
+        Spacer(Modifier.width(12.dp))
+        Text(count.toString(), color = Color(0xFF9FA7B8), fontSize = 14.sp)
+    }
+}
+
+@Composable
+private fun ChannelGrid7(channels: List<Channel>, onChannel: (Channel) -> Unit) {
+    val rows = channels.chunked(7)
+    Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+        rows.forEachIndexed { rowIndex, row ->
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                row.forEachIndexed { index, channel ->
+                    ChannelCard(channel, onChannel, Modifier.weight(1f), rowIndex * 7 + index)
+                }
+                repeat(7 - row.size) { Spacer(Modifier.weight(1f)) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ChannelCard(channel: Channel, onClick: (Channel) -> Unit, weight: Modifier, position: Int) {
+    var focused by remember { mutableStateOf(false) }
+    val scale by animateFloatAsState(if (focused) 1.035f else 1f, tween(130), label = "focusScale")
+    Surface(
+        onClick = { onClick(channel) },
+        modifier = weight
+            .scale(scale)
+            .height(148.dp)
+            .onFocusChanged { focused = it.isFocused }
+            .focusable()
+            .onPreviewKeyEvent { event ->
+                if (event.type == KeyEventType.KeyUp && (event.key == Key.Enter || event.key == Key.DirectionCenter)) {
+                    onClick(channel); true
+                } else false
+            },
+        shape = RoundedCornerShape(16.dp),
+        color = if (focused) Color(0xFF29164A) else Color(0xFF151A25),
+        border = androidx.compose.foundation.BorderStroke(
+            if (focused) 3.dp else 1.dp,
+            if (focused) Color(0xFFB36BFF) else Color(0xFF2A3140)
+        )
+    ) {
+        Column(
+            Modifier.fillMaxSize().padding(horizontal = 10.dp, vertical = 9.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
+        ) {
+            AsyncImage(
+                model = if (channel.logo.isBlank()) R.drawable.app_logo else channel.logo,
+                contentDescription = channel.name,
+                placeholder = R.drawable.app_logo,
+                error = R.drawable.app_logo,
+                contentScale = ContentScale.Fit,
+                modifier = Modifier.height(88.dp).fillMaxWidth(0.78f)
+            )
+            Spacer(Modifier.height(7.dp))
+            Text(
+                channel.name,
+                color = Color.White,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
+    }
+}
+
+@Composable
+private fun PlayerScreen(channel: Channel, onBack: () -> Unit, onPrevious: () -> Unit, onNext: () -> Unit) {
     val context = LocalContext.current
+    var retryCount by remember(channel.url) { mutableStateOf(0) }
     val player = remember(channel.url) {
         ExoPlayer.Builder(context).build().apply {
             val itemBuilder = MediaItem.Builder().setUri(channel.url)
-            if (channel.url.lowercase(Locale.US).contains(".m3u8")) {
-                itemBuilder.setMimeType(MimeTypes.APPLICATION_M3U8)
-            }
+            if (channel.url.lowercase(Locale.US).contains(".m3u8")) itemBuilder.setMimeType(MimeTypes.APPLICATION_M3U8)
             setMediaItem(itemBuilder.build())
-            prepare()
             playWhenReady = true
+            prepare()
         }
     }
 
     DisposableEffect(player) {
-        onDispose { player.release() }
+        val listener = object : Player.Listener {
+            override fun onPlayerError(error: PlaybackException) {
+                if (retryCount < 2) {
+                    retryCount++
+                    player.prepare()
+                    player.playWhenReady = true
+                }
+            }
+        }
+        player.addListener(listener)
+        onDispose {
+            player.removeListener(listener)
+            player.release()
+        }
     }
 
     Box(Modifier.fillMaxSize().background(Color.Black)) {
@@ -425,65 +411,132 @@ private fun PlayerScreen(
                     requestFocus()
                 }
             },
-            modifier = Modifier
-                .fillMaxSize()
-                .focusable()
-                .onPreviewKeyEvent { event ->
-                    if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
-                    when (event.key) {
-                        Key.ChannelUp -> { onNext(); true }
-                        Key.ChannelDown -> { onPrevious(); true }
-                        else -> false
-                    }
+            modifier = Modifier.fillMaxSize().onPreviewKeyEvent { event ->
+                if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                when (event.key) {
+                    Key.ChannelUp -> { onNext(); true }
+                    Key.ChannelDown -> { onPrevious(); true }
+                    else -> false
                 }
+            }
         )
 
-        Row(
-            Modifier
-                .align(Alignment.TopStart)
-                .padding(28.dp)
-                .clip(RoundedCornerShape(12.dp))
-                .background(Color(0x99070A0F))
-                .padding(horizontal = 16.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically
+        Surface(
+            onClick = onBack,
+            modifier = Modifier.padding(24.dp).align(Alignment.TopStart),
+            shape = RoundedCornerShape(14.dp),
+            color = Color(0xDD080A10)
         ) {
-            Text("●", color = Color(0xFFFF3B45), fontSize = 14.sp)
-            Spacer(Modifier.width(8.dp))
-            Text(channel.name, fontWeight = FontWeight.Bold, fontSize = 18.sp)
+            Row(Modifier.padding(horizontal = 15.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.ArrowBack, "Back", tint = Color.White, modifier = Modifier.size(24.dp))
+                Spacer(Modifier.width(9.dp))
+                Text(channel.name, color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+            }
         }
     }
 }
 
 @Composable
-private fun Logo() {
+private fun AboutScreen(onBack: () -> Unit) {
+    val context = LocalContext.current
+    val lastSync = remember { PlaylistRepository.lastSync(context) }
+    val syncText = if (lastSync > 0L) DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT).format(Date(lastSync)) else "Not synced yet"
+
+    Box(
+        Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color(0xFF130B24), Color(0xFF07090E))))
+    ) {
+        Column(
+            Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(44.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                HeaderButton(Icons.Default.ArrowBack, "Back", onBack)
+                Spacer(Modifier.width(20.dp))
+                Text("About", color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.ExtraBold)
+            }
+            Spacer(Modifier.height(38.dp))
+            Logo(Modifier.size(100.dp))
+            Spacer(Modifier.height(16.dp))
+            Text(BrandConfig.APP_NAME, color = Color.White, fontSize = 32.sp, fontWeight = FontWeight.ExtraBold)
+            Text("Premium Live TV", color = Color(0xFFB982FF), fontSize = 15.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(30.dp))
+            AboutCard("APK Details", listOf("App: ${BrandConfig.APP_NAME}", "Version: 1.0.0", "Last playlist sync: $syncText", "Automatic playlist sync: Every 1 hour"))
+            Spacer(Modifier.height(18.dp))
+            AboutCard("Developer Details", listOf("Developer: Hasan Ahmed", "App: ${BrandConfig.APP_NAME}"))
+        }
+    }
+}
+
+@Composable
+private fun AboutCard(title: String, lines: List<String>) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(0.72f),
+        shape = RoundedCornerShape(22.dp),
+        color = Color(0xFF121622),
+        border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF343B4E))
+    ) {
+        Column(Modifier.padding(24.dp)) {
+            Text(title, color = Color(0xFFC58CFF), fontSize = 19.sp, fontWeight = FontWeight.ExtraBold)
+            Spacer(Modifier.height(12.dp))
+            lines.forEach { Text(it, color = Color(0xFFE6E8EE), fontSize = 15.sp, modifier = Modifier.padding(vertical = 3.dp)) }
+        }
+    }
+}
+
+@Composable
+private fun Logo(modifier: Modifier = Modifier) {
     if (BrandConfig.REMOTE_LOGO_URL.isNotBlank()) {
         AsyncImage(
             model = BrandConfig.REMOTE_LOGO_URL,
-            contentDescription = "Logo",
+            contentDescription = BrandConfig.APP_NAME,
+            error = R.drawable.app_logo,
+            placeholder = R.drawable.app_logo,
             contentScale = ContentScale.Fit,
-            modifier = Modifier.size(58.dp).clip(RoundedCornerShape(14.dp))
+            modifier = modifier.clip(RoundedCornerShape(18.dp))
         )
     } else {
-        Box(
-            Modifier.size(58.dp)
-                .clip(RoundedCornerShape(14.dp))
-                .background(Color.White),
-            contentAlignment = Alignment.Center
-        ) {
-            Icon(Icons.Default.Tv, null, tint = Color.Black, modifier = Modifier.size(34.dp))
+        AsyncImage(
+            model = R.drawable.app_logo,
+            contentDescription = BrandConfig.APP_NAME,
+            contentScale = ContentScale.Fit,
+            modifier = modifier.clip(RoundedCornerShape(18.dp))
+        )
+    }
+}
+
+@Composable
+private fun SplashScreen() {
+    var visible by remember { mutableStateOf(false) }
+    val scale by animateFloatAsState(if (visible) 1f else 0.72f, tween(700), label = "splashScale")
+    val alpha by animateFloatAsState(if (visible) 1f else 0f, tween(700), label = "splashAlpha")
+    LaunchedEffect(Unit) { visible = true }
+
+    Box(
+        Modifier.fillMaxSize().background(Brush.radialGradient(listOf(Color(0xFF2A124D), Color(0xFF07080D)))),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.scale(scale)) {
+            Logo(Modifier.size(128.dp))
+            Spacer(Modifier.height(18.dp))
+            Text("Hasu Live Tv", color = Color.White.copy(alpha = alpha), fontSize = 34.sp, fontWeight = FontWeight.ExtraBold)
+            Spacer(Modifier.height(14.dp))
+            LinearProgressIndicator(
+                modifier = Modifier.width(180.dp).height(3.dp),
+                color = Color(0xFFB66CFF),
+                trackColor = Color(0x334A3A63)
+            )
         }
     }
 }
 
 @Composable
 private fun LoadingRows() {
-    Column(verticalArrangement = Arrangement.spacedBy(22.dp)) {
+    Column(verticalArrangement = Arrangement.spacedBy(18.dp)) {
         repeat(4) {
-            Row(horizontalArrangement = Arrangement.spacedBy(18.dp)) {
-                repeat(5) {
+            Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                repeat(7) {
                     Box(
-                        Modifier.width(210.dp).height(132.dp)
-                            .clip(RoundedCornerShape(16.dp))
+                        Modifier.weight(1f).height(148.dp).clip(RoundedCornerShape(16.dp))
                             .background(Color(0xFF121722))
                     )
                 }
@@ -498,10 +551,10 @@ private fun ErrorState(message: String, retry: () -> Unit) {
         Modifier.fillMaxWidth().padding(top = 80.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Icon(Icons.Default.CloudOff, null, modifier = Modifier.size(52.dp), tint = Color(0xFF9EA5B2))
+        Icon(Icons.Default.CloudOff, null, modifier = Modifier.size(58.dp), tint = Color(0xFFB982FF))
         Spacer(Modifier.height(16.dp))
-        Text(message, color = Color(0xFFB9C0CC), fontSize = 18.sp)
+        Text(message, color = Color(0xFFC4CAD6), fontSize = 18.sp)
         Spacer(Modifier.height(18.dp))
-        Button(onClick = retry) { Text("Retry") }
+        Button(onClick = retry, shape = RoundedCornerShape(14.dp)) { Text("Try Again") }
     }
 }
