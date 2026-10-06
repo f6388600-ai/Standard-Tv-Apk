@@ -35,8 +35,23 @@ object PlaylistRepository {
         }
 
         try {
-            val text = fetchPlaylist()
-            val parsed = parseAndSelectLive(text)
+            val urls = BrandConfig.PLAYLIST_URLS
+            val texts = coroutineScope {
+                urls.map { url ->
+                    async(Dispatchers.IO) {
+                        try {
+                            fetchPlaylist(url)
+                        } catch (_: Exception) {
+                            null
+                        }
+                    }
+                }.awaitAll().filterNotNull()
+            }
+            // If one playlist could not be downloaded, keep the last full list instead of a partial one.
+            if (texts.isEmpty() || (texts.size < urls.size && cached.isNotEmpty())) {
+                return@withContext cached
+            }
+            val parsed = parseAndSelectLive(texts)
             if (parsed.isNotEmpty()) {
                 saveCache(context, parsed)
                 return@withContext parsed
@@ -47,8 +62,8 @@ object PlaylistRepository {
         }
     }
 
-    private fun fetchPlaylist(): String {
-        val connection = URL(BrandConfig.PLAYLIST_URL).openConnection() as HttpURLConnection
+    private fun fetchPlaylist(url: String): String {
+        val connection = URL(url).openConnection() as HttpURLConnection
         return try {
             connection.connectTimeout = 7_000
             connection.readTimeout = 12_000
@@ -60,8 +75,8 @@ object PlaylistRepository {
         }
     }
 
-    private suspend fun parseAndSelectLive(text: String): List<Channel> = coroutineScope {
-        val candidates = parseCandidates(text)
+    private suspend fun parseAndSelectLive(texts: List<String>): List<Channel> = coroutineScope {
+        val candidates = parseCandidates(texts)
         val gate = Semaphore(16)
         candidates.map { candidate ->
             async(Dispatchers.IO) {
@@ -81,9 +96,16 @@ object PlaylistRepository {
         }.awaitAll().filterNotNull()
     }
 
-    private fun parseCandidates(text: String): List<ChannelCandidate> {
-        val lines = text.lineSequence().map { it.trim() }.filter { it.isNotBlank() }.toList()
+    private fun parseCandidates(texts: List<String>): List<ChannelCandidate> {
         val output = LinkedHashMap<String, MutableChannel>()
+        texts.forEach { parseInto(it, output) }
+        return output.values.map {
+            ChannelCandidate(it.id, it.name, it.logo, it.category, it.urls.toList())
+        }
+    }
+
+    private fun parseInto(text: String, output: LinkedHashMap<String, MutableChannel>) {
+        val lines = text.lineSequence().map { it.trim() }.filter { it.isNotBlank() }.toList()
         var pendingInfo: String? = null
 
         for (line in lines) {
@@ -111,10 +133,6 @@ object PlaylistRepository {
                 if (url.isNotBlank() && !current.urls.contains(url)) current.urls += url
             }
             pendingInfo = null
-        }
-
-        return output.values.map {
-            ChannelCandidate(it.id, it.name, it.logo, it.category, it.urls.toList())
         }
     }
 

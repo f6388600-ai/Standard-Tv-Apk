@@ -202,6 +202,7 @@ private fun LiveTvApp() {
     val listState = rememberLazyListState()
     var lastFocusedId by remember { mutableStateOf<String?>(null) }
     val restoreFocus = remember { FocusRequester() }
+    var recentIds by remember { mutableStateOf(RecentStore.load(context)) }
     var showExit by remember { mutableStateOf(false) }
     var showSplash by remember { mutableStateOf(true) }
     val onlineState = rememberIsOnline()
@@ -239,7 +240,13 @@ private fun LiveTvApp() {
     }
 
     LaunchedEffect(selected) {
-        selected?.let { lastFocusedId = it.id }
+        selected?.let {
+            lastFocusedId = it.id
+            recentIds = RecentStore.add(context, it.id)
+        }
+    }
+    val recentChannels = remember(channels, recentIds) {
+        recentIds.mapNotNull { id -> channels.firstOrNull { it.id == id } }.take(7)
     }
 
     BackHandler(enabled = selected != null) { selected = null }
@@ -285,7 +292,7 @@ private fun LiveTvApp() {
                         }
                     )
                 } else if (screen == Screen.ABOUT) {
-                    AboutScreen(onBack = { screen = Screen.HOME })
+                    AboutScreen(onBack = { screen = Screen.HOME }, channelCount = channels.size)
                 } else {
                     HomeScreen(
                         channels = channels,
@@ -298,7 +305,8 @@ private fun LiveTvApp() {
                         onQuery = { query = it },
                         listState = listState,
                         restoreId = lastFocusedId,
-                        restoreFocus = restoreFocus
+                        restoreFocus = restoreFocus,
+                        recents = recentChannels
                     )
                 }
             }
@@ -331,8 +339,10 @@ private fun HomeScreen(
     onQuery: (String) -> Unit,
     listState: LazyListState,
     restoreId: String?,
-    restoreFocus: FocusRequester
+    restoreFocus: FocusRequester,
+    recents: List<Channel>
 ) {
+    val showRecents = recents.isNotEmpty() && query.isBlank()
     val grouped = remember(channels, query) {
         val q = query.trim().lowercase(Locale.US)
         channels
@@ -344,7 +354,7 @@ private fun HomeScreen(
     // On coming back (Back from player / About): scroll to and focus the item the user left from.
     LaunchedEffect(Unit) {
         if (restoreId != null && restoreId != ABOUT_ID) {
-            var index = 0
+            var index = if (showRecents) 2 else 0
             var found = -1
             grouped.forEach { (_, list) ->
                 index += 1
@@ -395,6 +405,14 @@ private fun HomeScreen(
                         verticalArrangement = Arrangement.spacedBy(14.dp),
                         contentPadding = PaddingValues(bottom = 34.dp)
                     ) {
+                        if (showRecents) {
+                            item(key = "recent_header") {
+                                Box(Modifier.padding(top = 14.dp)) { CategoryRow("Recently Watched", recents.size) }
+                            }
+                            item(key = "recent_row") {
+                                ChannelRow(recents, onChannel, 0, null, restoreFocus)
+                            }
+                        }
                         grouped.forEach { (category, list) ->
                             item(key = "category_$category") {
                                 Box(Modifier.padding(top = 14.dp)) { CategoryRow(category, list.size) }
@@ -1150,10 +1168,10 @@ private fun FailedPanel(
 }
 
 @Composable
-private fun AboutScreen(onBack: () -> Unit) {
+private fun AboutScreen(onBack: () -> Unit, channelCount: Int) {
     val context = LocalContext.current
     val lastSync = remember { PlaylistRepository.lastSync(context) }
-    val syncText = if (lastSync > 0L) DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT).format(Date(lastSync)) else "Not synced yet"
+    val syncText = if (lastSync > 0L) DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT).format(Date(lastSync)) else "Not updated yet"
     val scroll = rememberScrollState()
     val scope = rememberCoroutineScope()
     val backFocus = remember { FocusRequester() }
@@ -1194,7 +1212,7 @@ private fun AboutScreen(onBack: () -> Unit) {
                 Text(BrandConfig.APP_NAME, color = Color.White, fontSize = 32.sp, fontWeight = FontWeight.ExtraBold)
                 Text("Premium Live TV", color = Color(0xFFB982FF), fontSize = 15.sp, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(30.dp))
-                AboutCard("APK Details", listOf("App: ${BrandConfig.APP_NAME}", "Version: 1.0.0", "Last playlist sync: $syncText", "Automatic playlist sync: Every 1 hour"))
+                AboutCard("APK Details", listOf("App: ${BrandConfig.APP_NAME}", "Version: 1.0.0", "Total Live Channels: $channelCount", "Last Update: $syncText"))
                 Spacer(Modifier.height(18.dp))
                 AboutCard("Developer Details", listOf("Developer: Hasan Ahmed", "App: ${BrandConfig.APP_NAME}"))
             }
