@@ -62,9 +62,17 @@ object PlaylistRepository {
         val candidates = parseCandidates(text)
         candidates.map { candidate ->
             async(Dispatchers.IO) {
-                candidate.copy(url = chooseWorkingUrl(candidate.urls))
+                val url = chooseWorkingUrl(candidate.urls)
+                if (url.isBlank()) null
+                else Channel(
+                    id = candidate.id,
+                    name = candidate.name,
+                    url = url,
+                    logo = candidate.logo,
+                    category = candidate.category
+                )
             }
-        }.awaitAll().filter { it.url.isNotBlank() }
+        }.awaitAll().filterNotNull()
     }
 
     private fun parseCandidates(text: String): List<ChannelCandidate> {

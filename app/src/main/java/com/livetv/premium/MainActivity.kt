@@ -2,7 +2,7 @@ package com.livetv.premium
 
 import android.app.Activity
 import android.os.Bundle
-import androidx.activity.BackHandler
+import androidx.activity.compose.BackHandler
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.animation.AnimatedContent
@@ -38,6 +38,7 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -349,8 +350,8 @@ private fun ChannelCard(channel: Channel, onClick: (Channel) -> Unit, weight: Mo
             AsyncImage(
                 model = if (channel.logo.isBlank()) R.drawable.app_logo else channel.logo,
                 contentDescription = channel.name,
-                placeholder = R.drawable.app_logo,
-                error = R.drawable.app_logo,
+                placeholder = painterResource(R.drawable.app_logo),
+                error = painterResource(R.drawable.app_logo),
                 contentScale = ContentScale.Fit,
                 modifier = Modifier.height(88.dp).fillMaxWidth(0.78f)
             )
@@ -489,8 +490,8 @@ private fun Logo(modifier: Modifier = Modifier) {
         AsyncImage(
             model = BrandConfig.REMOTE_LOGO_URL,
             contentDescription = BrandConfig.APP_NAME,
-            error = R.drawable.app_logo,
-            placeholder = R.drawable.app_logo,
+            error = painterResource(R.drawable.app_logo),
+            placeholder = painterResource(R.drawable.app_logo),
             contentScale = ContentScale.Fit,
             modifier = modifier.clip(RoundedCornerShape(18.dp))
         )
