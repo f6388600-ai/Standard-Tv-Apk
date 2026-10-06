@@ -8,7 +8,6 @@ import android.os.SystemClock
 import androidx.media3.common.C
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.ui.geometry.CornerRadius
-import androidx.compose.ui.input.key.nativeKeyEvent
 import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -1042,12 +1041,12 @@ private fun PlayerScreen(
 private fun SeekFlashOverlay(flash: Int) {
     Row(Modifier.fillMaxSize().zIndex(4f)) {
         Box(Modifier.weight(1f).fillMaxHeight(), contentAlignment = Alignment.Center) {
-            AnimatedVisibility(visible = flash < 0, enter = fadeIn(tween(80)), exit = fadeOut(tween(300))) {
+            androidx.compose.animation.AnimatedVisibility(visible = flash < 0, enter = fadeIn(tween(80)), exit = fadeOut(tween(300))) {
                 SeekBadge(Icons.Default.FastRewind)
             }
         }
         Box(Modifier.weight(1f).fillMaxHeight(), contentAlignment = Alignment.Center) {
-            AnimatedVisibility(visible = flash > 0, enter = fadeIn(tween(80)), exit = fadeOut(tween(300))) {
+            androidx.compose.animation.AnimatedVisibility(visible = flash > 0, enter = fadeIn(tween(80)), exit = fadeOut(tween(300))) {
                 SeekBadge(Icons.Default.FastForward)
             }
         }
