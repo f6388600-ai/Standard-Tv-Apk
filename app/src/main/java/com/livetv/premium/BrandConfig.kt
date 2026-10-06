@@ -6,10 +6,10 @@ object BrandConfig {
 
     // Playlist 1
     const val PLAYLIST_URL =
-        "https://raw.githubusercontent.com/f6388600-ai/iptv-auto-playlist/refs/heads/main/playlist.m3u"
+        "https://raw.githubusercontent.com/f6388600-ai/Gvvgh/refs/heads/main/playlist.m3u"
 
     // Playlist 2 - paste the second playlist link here (leave "" to disable).
-    const val PLAYLIST_URL_2 = ""
+    const val PLAYLIST_URL_2 = "https://raw.githubusercontent.com/f6388600-ai/iptv-auto-playlist/refs/heads/main/playlist.m3u"
 
     // Both playlists are loaded and merged. Blank links are skipped.
     val PLAYLIST_URLS: List<String> = listOf(PLAYLIST_URL, PLAYLIST_URL_2).filter { it.isNotBlank() }
