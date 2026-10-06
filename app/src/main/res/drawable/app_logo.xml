@@ -3,8 +3,32 @@
     android:height="256dp"
     android:viewportWidth="256"
     android:viewportHeight="256">
-    <path android:fillColor="#10131A" android:pathData="M0,0h256v256h-256z"/>
-    <path android:fillColor="#FFFFFF" android:pathData="M66,75h124a10,10 0,0 1,10 10v86a10,10 0,0 1,-10 10H66a10,10 0,0 1,-10 -10V85a10,10 0,0 1,10 -10z"/>
-    <path android:fillColor="#10131A" android:pathData="M103,98l55,31 -55,31z"/>
-    <path android:fillColor="#FFFFFF" android:pathData="M91,52h12v16h-12zM153,52h12v16h-12z"/>
+
+    <!-- Deep premium background -->
+    <path android:fillColor="#070B14"
+        android:pathData="M0,0h256v256h-256z"/>
+
+    <!-- Soft glow ring (premium depth) -->
+    <path android:fillColor="#0F1626"
+        android:pathData="M128,34a94,94 0 1,0 0.1,0z"/>
+
+    <!-- Main screen with soft shadow effect -->
+    <path android:fillColor="#0A0E1A"
+        android:pathData="M62,73h132a16,16 0 0 1,16 16v82a16,16 0 0 1,-16 16H62a16,16 0 0 1,-16 -16V89a16,16 0 0 1,16 -16z"/>
+
+    <!-- White screen surface -->
+    <path android:fillColor="#FFFFFF"
+        android:pathData="M66,77h124a14,14 0 0 1,14 14v74a14,14 0 0 1,-14 14H66a14,14 0 0 1,-14 -14V91a14,14 0 0 1,14 -14z"/>
+
+    <!-- Premium gradient-like accent bar (top) -->
+    <path android:fillColor="#4F8CFF"
+        android:pathData="M66,77h124a14,14 0 0 1,14 14v4H52v-4a14,14 0 0 1,14 -14z"/>
+
+    <!-- Play button (bold, centered, premium dark) -->
+    <path android:fillColor="#070B14"
+        android:pathData="M106,102l54,30 -54,30z"/>
+
+    <!-- Top indicator bars (premium blue) -->
+    <path android:fillColor="#4F8CFF"
+        android:pathData="M91,50h12v18h-12zM153,50h12v18h-12z"/>
 </vector>
