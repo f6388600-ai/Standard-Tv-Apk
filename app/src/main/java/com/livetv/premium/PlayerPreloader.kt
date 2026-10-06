@@ -31,6 +31,8 @@ object PlayerPreloader {
 
     /** How far ahead we keep buffering: 5 min on normal devices, 2 min on low-memory ones. */
     fun dvrMaxMs(context: Context): Long {
+        val chosen = SettingsStore.bufferMinutes(context)
+        if (chosen > 0) return chosen * 60_000L
         val am = context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
         val low = am == null || am.isLowRamDevice || am.largeMemoryClass < 192
         return if (low) 2 * 60_000L else 5 * 60_000L
@@ -59,11 +61,19 @@ object PlayerPreloader {
             .setUsage(C.USAGE_MEDIA)
             .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
             .build()
-        return ExoPlayer.Builder(app)
+        val player = ExoPlayer.Builder(app)
             .setMediaSourceFactory(DefaultMediaSourceFactory(app).setDataSourceFactory(http))
             .setLoadControl(loadControl)
             .setAudioAttributes(audio, true)
             .build()
+        if (SettingsStore.lowData(app)) {
+            // Data saver: cap video at SD.
+            player.trackSelectionParameters = player.trackSelectionParameters
+                .buildUpon()
+                .setMaxVideoSizeSd()
+                .build()
+        }
+        return player
     }
 
     fun preload(context: Context, channel: Channel) {

@@ -32,6 +32,26 @@ jobs:
         with:
           gradle-version: "9.6.0"
 
+      - name: Apply app logo from URL (optional)
+        run: |
+          LOGO_URL=$(grep -oP 'REMOTE_LOGO_URL = "\K[^"]*' app/src/main/java/com/livetv/premium/BrandConfig.kt || true)
+          if [ -n "$LOGO_URL" ]; then
+            echo "Downloading logo: $LOGO_URL"
+            if curl -fsSL --max-time 40 "$LOGO_URL" -o /tmp/logo_raw; then
+              if command -v magick >/dev/null 2>&1; then CONVERT="magick"; else CONVERT="convert"; fi
+              if $CONVERT "/tmp/logo_raw[0]" -resize 512x512 -background none -gravity center -extent 512x512 PNG32:/tmp/app_logo.png; then
+                mkdir -p app/src/main/res/drawable-nodpi
+                cp /tmp/app_logo.png app/src/main/res/drawable-nodpi/app_logo.png
+                rm -f app/src/main/res/drawable/app_logo.xml
+                echo "Launcher icon updated from URL"
+              else
+                echo "Logo conversion failed - keeping default icon"
+              fi
+            else
+              echo "Logo download failed - keeping default icon"
+            fi
+          fi
+
       - name: Build debug APK
         run: gradle :app:assembleDebug --stacktrace
 

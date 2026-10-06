@@ -28,4 +28,12 @@ object RecentStore {
         }
         return list
     }
+
+    fun clear(context: Context): List<String> {
+        try {
+            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().remove(KEY).apply()
+        } catch (_: Throwable) {
+        }
+        return emptyList()
+    }
 }

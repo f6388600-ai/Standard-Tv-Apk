@@ -4,6 +4,13 @@ import android.app.Activity
 import android.content.Context
 import android.os.Bundle
 import android.util.Log
+import android.widget.Toast
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
 import android.os.SystemClock
 import androidx.media3.common.C
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
@@ -118,9 +125,10 @@ data class Channel(
     val category: String
 )
 
-private enum class Screen { HOME, ABOUT }
+private enum class Screen { HOME, ABOUT, SETTINGS }
 
 private const val ABOUT_ID = "__about__"
+private const val SETTINGS_ID = "__settings__"
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -132,12 +140,13 @@ class MainActivity : ComponentActivity() {
             Log.e("HasuLiveTv", "WorkManager schedule failed", e)
         }
         setContent {
+            val hadCrash = remember { readLastCrash() != null }
             var crash by remember { mutableStateOf(readLastCrash()) }
             val c = crash
             if (c != null) {
                 CrashScreen(c) { clearLastCrash(); crash = null }
             } else {
-                LiveTvApp()
+                LiveTvApp(skipAutoResume = hadCrash)
             }
         }
     }
@@ -193,7 +202,7 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-private fun LiveTvApp() {
+private fun LiveTvApp(skipAutoResume: Boolean = false) {
     val context = LocalContext.current
     val activity = context as Activity
     val scope = rememberCoroutineScope()
@@ -208,6 +217,16 @@ private fun LiveTvApp() {
     var lastFocusedId by remember { mutableStateOf<String?>(null) }
     val restoreFocus = remember { FocusRequester() }
     var recentIds by remember { mutableStateOf(RecentStore.load(context)) }
+    var favoriteIds by remember { mutableStateOf(FavoriteStore.load(context)) }
+    var failedIds by remember { mutableStateOf(HealthStore.load(context)) }
+    var lastSync by remember { mutableStateOf(PlaylistRepository.lastSync(context)) }
+    var refreshStatus by remember { mutableStateOf(RefreshStatus.IDLE) }
+    var refreshMessage by remember { mutableStateOf("") }
+    var sleepMinutes by remember { mutableStateOf(0) }
+    var sleepAt by remember { mutableStateOf(0L) }
+    var previousId by remember { mutableStateOf<String?>(null) }
+    var lastPlayedId by remember { mutableStateOf<String?>(null) }
+    var autoResumeDone by remember { mutableStateOf(false) }
     var showExit by remember { mutableStateOf(false) }
     var showSplash by remember { mutableStateOf(true) }
     val onlineState = rememberIsOnline()
@@ -219,12 +238,44 @@ private fun LiveTvApp() {
         error = null
         try {
             val result = PlaylistRepository.load(context)
+            lastSync = PlaylistRepository.lastSync(context)
             if (result.isNotEmpty()) channels = result
             else if (channels.isEmpty()) error = "No channels found in playlist."
         } catch (e: Exception) {
             if (channels.isEmpty()) error = e.message ?: "Unable to load playlist."
         } finally {
             loading = false
+        }
+    }
+
+    // Manual "Update Now": always fetch fresh data and report the result.
+    suspend fun refreshChannels() {
+        if (refreshStatus == RefreshStatus.UPDATING) return
+        refreshStatus = RefreshStatus.UPDATING
+        refreshMessage = "Updating channels…"
+        try {
+            val result = PlaylistRepository.refresh(context)
+            if (result.fresh && result.channels.isNotEmpty()) {
+                channels = result.channels
+                error = null
+                lastSync = PlaylistRepository.lastSync(context)
+                refreshStatus = RefreshStatus.DONE
+                refreshMessage = "Updated - ${result.channels.size} live channels"
+            } else {
+                refreshStatus = RefreshStatus.FAILED
+                refreshMessage = "Couldn't update right now. Check your internet and try again."
+            }
+        } catch (e: Exception) {
+            refreshStatus = RefreshStatus.FAILED
+            refreshMessage = "Update failed. Please try again."
+        }
+        Toast.makeText(context, refreshMessage, Toast.LENGTH_SHORT).show()
+    }
+
+    LaunchedEffect(refreshStatus) {
+        if (refreshStatus == RefreshStatus.DONE || refreshStatus == RefreshStatus.FAILED) {
+            delay(8_000)
+            refreshStatus = RefreshStatus.IDLE
         }
     }
 
@@ -248,7 +299,43 @@ private fun LiveTvApp() {
         selected?.let {
             lastFocusedId = it.id
             recentIds = RecentStore.add(context, it.id)
+            SettingsStore.setLastChannel(context, it.id)
+            // Remember the channel we came from, for the "last channel" button.
+            if (lastPlayedId != null && lastPlayedId != it.id) previousId = lastPlayedId
+            lastPlayedId = it.id
         }
+    }
+
+    // Open the last watched channel when the app starts (if enabled in Settings).
+    LaunchedEffect(channels, showSplash) {
+        if (!autoResumeDone && !showSplash && channels.isNotEmpty()) {
+            autoResumeDone = true
+            if (!skipAutoResume && SettingsStore.autoResume(context)) {
+                val id = SettingsStore.lastChannel(context)
+                channels.firstOrNull { it.id == id }?.let { selected = it }
+            }
+        }
+    }
+
+    // Sleep timer.
+    LaunchedEffect(sleepAt) {
+        if (sleepAt > 0L) {
+            val wait = sleepAt - SystemClock.elapsedRealtime()
+            if (wait > 0L) delay(wait)
+            activity.finish()
+        }
+    }
+
+    val toggleFavorite: (Channel) -> Unit = { ch ->
+        val was = ch.id in favoriteIds
+        favoriteIds = FavoriteStore.toggle(context, ch.id)
+        Toast.makeText(context, if (was) "Removed from Favorites" else "Added to Favorites", Toast.LENGTH_SHORT).show()
+    }
+    val favChannels = remember(channels, favoriteIds) {
+        favoriteIds.mapNotNull { id -> channels.firstOrNull { it.id == id } }
+    }
+    val categoryCount = remember(channels) {
+        channels.map { it.category.ifBlank { "Live TV" }.lowercase(Locale.US) }.distinct().size
     }
     val recentChannels = remember(channels, recentIds) {
         recentIds.mapNotNull { id -> channels.firstOrNull { it.id == id } }.take(7)
@@ -284,8 +371,26 @@ private fun LiveTvApp() {
                     val currentIndex = channels.indexOfFirst { it.id == channel.id }
                     PlayerScreen(
                         channel = channel,
+                        number = currentIndex + 1,
+                        channels = channels,
                         nextChannel = if (currentIndex >= 0) channels.getOrNull(currentIndex + 1) else null,
                         hasPrevious = currentIndex > 0,
+                        previousChannel = previousId?.let { pid ->
+                            if (pid != channel.id) channels.firstOrNull { it.id == pid } else null
+                        },
+                        onRecall = {
+                            previousId?.let { pid -> channels.firstOrNull { it.id == pid }?.let { selected = it } }
+                        },
+                        onPick = { selected = it },
+                        onJumpTo = { n ->
+                            val target = channels.getOrNull(n - 1)
+                            if (target != null) {
+                                if (target.id != channel.id) selected = target
+                                true
+                            } else false
+                        },
+                        nameOf = { n -> channels.getOrNull(n - 1)?.name },
+                        onHealth = { ok -> failedIds = HealthStore.mark(context, channel.id, ok) },
                         onBack = { selected = null },
                         onPrevious = {
                             val index = channels.indexOfFirst { it.id == channel.id }
@@ -297,7 +402,31 @@ private fun LiveTvApp() {
                         }
                     )
                 } else if (screen == Screen.ABOUT) {
-                    AboutScreen(onBack = { screen = Screen.HOME }, channelCount = channels.size)
+                    AboutScreen(
+                        onBack = { screen = Screen.HOME },
+                        channelCount = channels.size,
+                        categoryCount = categoryCount,
+                        lastSync = lastSync,
+                        refreshStatus = refreshStatus,
+                        refreshMessage = refreshMessage,
+                        onRefresh = { scope.launch { refreshChannels() } }
+                    )
+                } else if (screen == Screen.SETTINGS) {
+                    SettingsScreen(
+                        onBack = { screen = Screen.HOME },
+                        sleepMinutes = sleepMinutes,
+                        onSleep = { m ->
+                            sleepMinutes = m
+                            sleepAt = if (m > 0) SystemClock.elapsedRealtime() + m * 60_000L else 0L
+                            Toast.makeText(
+                                context,
+                                if (m > 0) "Sleep timer: $m min" else "Sleep timer off",
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        },
+                        onClearRecent = { recentIds = RecentStore.clear(context) },
+                        onClearFavorites = { favoriteIds = FavoriteStore.clear(context) }
+                    )
                 } else {
                     HomeScreen(
                         channels = channels,
@@ -306,6 +435,22 @@ private fun LiveTvApp() {
                         onRetry = { scope.launch { loadPlaylist() } },
                         onChannel = { lastFocusedId = it.id; selected = it },
                         onAbout = { lastFocusedId = ABOUT_ID; screen = Screen.ABOUT },
+                        onSettings = { lastFocusedId = SETTINGS_ID; screen = Screen.SETTINGS },
+                        onRefresh = { scope.launch { refreshChannels() } },
+                        refreshing = refreshStatus == RefreshStatus.UPDATING,
+                        favorites = favChannels,
+                        favoriteIds = favoriteIds,
+                        failedIds = failedIds,
+                        onToggleFavorite = toggleFavorite,
+                        onJumpTo = { n ->
+                            val target = channels.getOrNull(n - 1)
+                            if (target != null) {
+                                lastFocusedId = target.id
+                                selected = target
+                                true
+                            } else false
+                        },
+                        nameOf = { n -> channels.getOrNull(n - 1)?.name },
                         query = query,
                         onQuery = { query = it },
                         listState = listState,
@@ -319,12 +464,49 @@ private fun LiveTvApp() {
         }
 
         if (showExit) {
+            val stayFocus = remember { FocusRequester() }
             AlertDialog(
                 onDismissRequest = { showExit = false },
-                title = { Text("Exit Live TV?") },
-                text = { Text("Are you sure you want to close the app?") },
-                confirmButton = { TextButton(onClick = { activity.finish() }) { Text("Exit") } },
-                dismissButton = { TextButton(onClick = { showExit = false }) { Text("Cancel") } }
+                icon = { Logo(Modifier.size(68.dp)) },
+                title = {
+                    Text(
+                        "Leaving already?",
+                        color = Color.White,
+                        fontWeight = FontWeight.ExtraBold,
+                        textAlign = TextAlign.Center
+                    )
+                },
+                text = {
+                    LaunchedEffect(Unit) {
+                        delay(100)
+                        try {
+                            stayFocus.requestFocus()
+                        } catch (_: Throwable) {
+                        }
+                    }
+                    Text(
+                        "Your favorites and recently watched channels are saved. See you soon on ${BrandConfig.APP_NAME}!",
+                        color = Color(0xFFC4CAD6),
+                        textAlign = TextAlign.Center
+                    )
+                },
+                confirmButton = {
+                    OutlinedButton(onClick = { activity.finish() }, shape = RoundedCornerShape(14.dp)) {
+                        Text("Exit", fontWeight = FontWeight.Bold)
+                    }
+                },
+                dismissButton = {
+                    Button(
+                        onClick = { showExit = false },
+                        shape = RoundedCornerShape(14.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFA56BFF), contentColor = Color.White),
+                        modifier = Modifier.focusRequester(stayFocus)
+                    ) {
+                        Text("Keep Watching", fontWeight = FontWeight.Bold)
+                    }
+                },
+                shape = RoundedCornerShape(26.dp),
+                containerColor = Color(0xFF141826)
             )
         }
 
@@ -340,6 +522,15 @@ private fun HomeScreen(
     onRetry: () -> Unit,
     onChannel: (Channel) -> Unit,
     onAbout: () -> Unit,
+    onSettings: () -> Unit,
+    onRefresh: () -> Unit,
+    refreshing: Boolean,
+    favorites: List<Channel>,
+    favoriteIds: Set<String>,
+    failedIds: Set<String>,
+    onToggleFavorite: (Channel) -> Unit,
+    onJumpTo: (Int) -> Boolean,
+    nameOf: (Int) -> String?,
     query: String,
     onQuery: (String) -> Unit,
     listState: LazyListState,
@@ -348,6 +539,18 @@ private fun HomeScreen(
     recents: List<Channel>
 ) {
     val showRecents = recents.isNotEmpty() && query.isBlank()
+    val showFavs = favorites.isNotEmpty() && query.isBlank()
+    val numbers = remember(channels) { channels.withIndex().associate { it.value.id to (it.index + 1) } }
+    var searchFocused by remember { mutableStateOf(false) }
+    var numberBuffer by remember { mutableStateOf("") }
+    LaunchedEffect(numberBuffer) {
+        if (numberBuffer.isNotEmpty()) {
+            delay(1_600)
+            val n = numberBuffer.toIntOrNull()
+            numberBuffer = ""
+            if (n != null && n > 0) onJumpTo(n)
+        }
+    }
     val grouped = remember(channels, query) {
         val q = query.trim().lowercase(Locale.US)
         channels
@@ -358,8 +561,8 @@ private fun HomeScreen(
 
     // On coming back (Back from player / About): scroll to and focus the item the user left from.
     LaunchedEffect(Unit) {
-        if (restoreId != null && restoreId != ABOUT_ID) {
-            var index = if (showRecents) 2 else 0
+        if (restoreId != null && restoreId != ABOUT_ID && restoreId != SETTINGS_ID) {
+            var index = (if (showFavs) 1 + favorites.chunked(7).size else 0) + (if (showRecents) 2 else 0)
             var found = -1
             grouped.forEach { (_, list) ->
                 index += 1
@@ -384,19 +587,42 @@ private fun HomeScreen(
     }
 
     Box(
-        Modifier.fillMaxSize().background(
-            Brush.verticalGradient(
-                listOf(Color(0xFF100B20), Color(0xFF080B14), Color(0xFF05060A))
+        Modifier
+            .fillMaxSize()
+            .background(
+                Brush.verticalGradient(
+                    listOf(Color(0xFF100B20), Color(0xFF080B14), Color(0xFF05060A))
+                )
             )
-        )
+            .onPreviewKeyEvent { event ->
+                // Number keys type a channel number (not while typing in the search box).
+                if (event.type != KeyEventType.KeyDown || searchFocused) return@onPreviewKeyEvent false
+                val digit = digitOf(event.key)
+                if (digit != null) {
+                    numberBuffer = (numberBuffer + digit).takeLast(4)
+                    true
+                } else if (numberBuffer.isNotEmpty() &&
+                    (event.key == Key.DirectionCenter || event.key == Key.Enter || event.key == Key.NumPadEnter)
+                ) {
+                    val n = numberBuffer.toIntOrNull()
+                    numberBuffer = ""
+                    if (n != null && n > 0) onJumpTo(n)
+                    true
+                } else false
+            }
     ) {
         Column(Modifier.fillMaxSize().padding(horizontal = 34.dp, vertical = 22.dp)) {
             TopBar(
                 query,
                 onQuery = onQuery,
                 onAbout = onAbout,
+                onSettings = onSettings,
+                onRefresh = onRefresh,
+                refreshing = refreshing,
                 loading = loading,
-                aboutFocus = if (restoreId == ABOUT_ID) restoreFocus else null
+                onSearchFocus = { searchFocused = it },
+                aboutFocus = if (restoreId == ABOUT_ID) restoreFocus else null,
+                settingsFocus = if (restoreId == SETTINGS_ID) restoreFocus else null
             )
             Spacer(Modifier.height(22.dp))
 
@@ -410,12 +636,20 @@ private fun HomeScreen(
                         verticalArrangement = Arrangement.spacedBy(14.dp),
                         contentPadding = PaddingValues(bottom = 34.dp)
                     ) {
+                        if (showFavs) {
+                            item(key = "fav_header") {
+                                Box(Modifier.padding(top = 14.dp)) { CategoryRow("My Favorites", favorites.size) }
+                            }
+                            itemsIndexed(favorites.chunked(7), key = { i, _ -> "fav_row_$i" }) { i, row ->
+                                ChannelRow(row, onChannel, i, null, restoreFocus, numbers, favoriteIds, failedIds, onToggleFavorite)
+                            }
+                        }
                         if (showRecents) {
                             item(key = "recent_header") {
                                 Box(Modifier.padding(top = 14.dp)) { CategoryRow("Recently Watched", recents.size) }
                             }
                             item(key = "recent_row") {
-                                ChannelRow(recents, onChannel, 0, null, restoreFocus)
+                                ChannelRow(recents, onChannel, 0, null, restoreFocus, numbers, favoriteIds, failedIds, onToggleFavorite)
                             }
                         }
                         grouped.forEach { (category, list) ->
@@ -424,13 +658,14 @@ private fun HomeScreen(
                             }
                             val rows = list.chunked(7)
                             itemsIndexed(rows, key = { i, _ -> "row_${category}_$i" }) { i, row ->
-                                ChannelRow(row, onChannel, i, restoreId, restoreFocus)
+                                ChannelRow(row, onChannel, i, restoreId, restoreFocus, numbers, favoriteIds, failedIds, onToggleFavorite)
                             }
                         }
                     }
                 }
             }
         }
+        NumberOverlay(numberBuffer, nameOf(numberBuffer.toIntOrNull() ?: 0))
     }
 }
 
@@ -439,18 +674,23 @@ private fun TopBar(
     query: String,
     onQuery: (String) -> Unit,
     onAbout: () -> Unit,
+    onSettings: () -> Unit,
+    onRefresh: () -> Unit,
+    refreshing: Boolean,
     loading: Boolean,
-    aboutFocus: FocusRequester? = null
+    onSearchFocus: (Boolean) -> Unit,
+    aboutFocus: FocusRequester? = null,
+    settingsFocus: FocusRequester? = null
 ) {
     val keyboard = LocalSoftwareKeyboardController.current
     val focusManager = LocalFocusManager.current
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         Logo(Modifier.size(62.dp))
         Spacer(Modifier.width(14.dp))
-        Column(Modifier.widthIn(min = 210.dp, max = 300.dp)) {
+        Column(Modifier.widthIn(min = 150.dp, max = 230.dp)) {
             Text("Hasu Live Tv", fontSize = 28.sp, fontWeight = FontWeight.ExtraBold, color = Color.White)
             Text(
-                if (loading) "Syncing live channels…" else "LIVE • FAST • PREMIUM",
+                if (loading || refreshing) "Syncing live channels…" else "LIVE • FAST • PREMIUM",
                 color = Color(0xFFB982FF), fontSize = 12.sp, fontWeight = FontWeight.Bold
             )
         }
@@ -472,7 +712,8 @@ private fun TopBar(
                 focusManager.moveFocus(FocusDirection.Down)
             }),
             modifier = Modifier
-                .width(370.dp)
+                .width(300.dp)
+                .onFocusChanged { onSearchFocus(it.isFocused) }
                 .onPreviewKeyEvent { event ->
                     // OK / Enter on the remote opens the keyboard on the first press.
                     if (event.key == Key.DirectionCenter || event.key == Key.Enter || event.key == Key.NumPadEnter) {
@@ -492,16 +733,21 @@ private fun TopBar(
             )
         )
         Spacer(Modifier.width(14.dp))
+        HeaderButton(Icons.Default.Refresh, "Update channels", onRefresh, busy = refreshing)
+        Spacer(Modifier.width(10.dp))
+        HeaderButton(Icons.Default.Settings, "Settings", onSettings, settingsFocus)
+        Spacer(Modifier.width(10.dp))
         HeaderButton(Icons.Default.Info, "About", onAbout, aboutFocus)
     }
 }
 
 @Composable
-private fun HeaderButton(
+internal fun HeaderButton(
     icon: ImageVector,
     label: String,
     onClick: () -> Unit,
-    focusRequester: FocusRequester? = null
+    focusRequester: FocusRequester? = null,
+    busy: Boolean = false
 ) {
     var focused by remember { mutableStateOf(false) }
     Surface(
@@ -515,7 +761,11 @@ private fun HeaderButton(
         color = if (focused) Color(0xFF2B1850) else Color(0xFF151A27)
     ) {
         Box(contentAlignment = Alignment.Center) {
-            Icon(icon, label, tint = Color.White, modifier = Modifier.size(27.dp))
+            if (busy) {
+                CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.5.dp, color = Color.White)
+            } else {
+                Icon(icon, label, tint = Color.White, modifier = Modifier.size(27.dp))
+            }
         }
     }
 }
@@ -540,24 +790,41 @@ private fun ChannelRow(
     onChannel: (Channel) -> Unit,
     rowIndex: Int,
     restoreId: String?,
-    restoreFocus: FocusRequester
+    restoreFocus: FocusRequester,
+    numbers: Map<String, Int>,
+    favoriteIds: Set<String>,
+    failedIds: Set<String>,
+    onToggleFavorite: (Channel) -> Unit
 ) {
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-        row.forEachIndexed { index, channel ->
+        row.forEach { channel ->
             ChannelCard(
-                channel,
-                onChannel,
-                Modifier.weight(1f).then(if (channel.id == restoreId) Modifier.focusRequester(restoreFocus) else Modifier),
-                rowIndex * 7 + index
+                channel = channel,
+                onClick = onChannel,
+                onToggleFavorite = onToggleFavorite,
+                weight = Modifier.weight(1f).then(if (channel.id == restoreId) Modifier.focusRequester(restoreFocus) else Modifier),
+                number = numbers[channel.id] ?: 0,
+                isFavorite = channel.id in favoriteIds,
+                offline = channel.id in failedIds
             )
         }
         repeat(7 - row.size) { Spacer(Modifier.weight(1f)) }
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun ChannelCard(channel: Channel, onClick: (Channel) -> Unit, weight: Modifier, position: Int) {
+private fun ChannelCard(
+    channel: Channel,
+    onClick: (Channel) -> Unit,
+    onToggleFavorite: (Channel) -> Unit,
+    weight: Modifier,
+    number: Int,
+    isFavorite: Boolean,
+    offline: Boolean
+) {
     var focused by remember { mutableStateOf(false) }
+    var longHandled by remember { mutableStateOf(false) }
     val scale by animateFloatAsState(if (focused) 1.035f else 1f, tween(130), label = "focusScale")
     val context = LocalContext.current
     val interaction = remember { MutableInteractionSource() }
@@ -572,12 +839,32 @@ private fun ChannelCard(channel: Channel, onClick: (Channel) -> Unit, weight: Mo
         }
     }
     Surface(
-        onClick = { onClick(channel) },
-        interactionSource = interaction,
         modifier = weight
             .scale(scale)
             .height(148.dp)
-            .onFocusChanged { focused = it.hasFocus },
+            .onFocusChanged { focused = it.hasFocus }
+            .onPreviewKeyEvent { event ->
+                // Hold OK on the remote = add / remove favorite.
+                val isOk = event.key == Key.DirectionCenter || event.key == Key.Enter || event.key == Key.NumPadEnter
+                if (!isOk) {
+                    false
+                } else if (event.type == KeyEventType.KeyDown) {
+                    if (event.nativeKeyEvent.repeatCount >= 1 && !longHandled) {
+                        longHandled = true
+                        onToggleFavorite(channel)
+                        true
+                    } else longHandled
+                } else if (event.type == KeyEventType.KeyUp && longHandled) {
+                    longHandled = false
+                    true
+                } else false
+            }
+            .combinedClickable(
+                interactionSource = interaction,
+                indication = null,
+                onClick = { onClick(channel) },
+                onLongClick = { onToggleFavorite(channel) }
+            ),
         shape = RoundedCornerShape(16.dp),
         color = if (focused) Color(0xFF29164A) else Color(0xFF151A25),
         border = androidx.compose.foundation.BorderStroke(
@@ -585,23 +872,42 @@ private fun ChannelCard(channel: Channel, onClick: (Channel) -> Unit, weight: Mo
             if (focused) Color(0xFFB36BFF) else Color(0xFF2A3140)
         )
     ) {
-        Column(
-            Modifier.fillMaxSize().padding(horizontal = 10.dp, vertical = 9.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center
-        ) {
-            ChannelLogo(channel, Modifier.height(88.dp).fillMaxWidth(0.78f))
-            Spacer(Modifier.height(7.dp))
-            Text(
-                channel.name,
-                color = Color.White,
-                fontSize = 14.sp,
-                fontWeight = FontWeight.Bold,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                textAlign = TextAlign.Center,
-                modifier = Modifier.fillMaxWidth()
-            )
+        Box(Modifier.fillMaxSize()) {
+            Column(
+                Modifier.fillMaxSize().padding(horizontal = 10.dp, vertical = 9.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
+            ) {
+                ChannelLogo(channel, Modifier.height(88.dp).fillMaxWidth(0.78f))
+                Spacer(Modifier.height(7.dp))
+                Text(
+                    channel.name,
+                    color = Color.White,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+            Row(Modifier.align(Alignment.TopStart).padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                if (offline) {
+                    Box(Modifier.size(7.dp).clip(CircleShape).background(Color(0xFFFF5252)))
+                    Spacer(Modifier.width(4.dp))
+                }
+                if (number > 0) {
+                    Text("$number", color = Color(0xFF8D94A5), fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+            if (isFavorite) {
+                Icon(
+                    Icons.Default.Favorite,
+                    null,
+                    tint = Color(0xFFFF4D79),
+                    modifier = Modifier.align(Alignment.TopEnd).padding(8.dp).size(16.dp)
+                )
+            }
         }
     }
 }
@@ -627,6 +933,20 @@ private const val RESUME_PROMPT_MS = 10_000L
 private const val SEEK_STEP_MS = 10_000L
 private const val LIVE_EDGE_MS = 3_000L
 
+private fun digitOf(key: Key): Int? = when (key) {
+    Key.Zero, Key.NumPad0 -> 0
+    Key.One, Key.NumPad1 -> 1
+    Key.Two, Key.NumPad2 -> 2
+    Key.Three, Key.NumPad3 -> 3
+    Key.Four, Key.NumPad4 -> 4
+    Key.Five, Key.NumPad5 -> 5
+    Key.Six, Key.NumPad6 -> 6
+    Key.Seven, Key.NumPad7 -> 7
+    Key.Eight, Key.NumPad8 -> 8
+    Key.Nine, Key.NumPad9 -> 9
+    else -> null
+}
+
 private fun fmtTime(ms: Long): String {
     val total = (ms / 1000L).coerceAtLeast(0L)
     val m = total / 60L
@@ -637,8 +957,16 @@ private fun fmtTime(ms: Long): String {
 @Composable
 private fun PlayerScreen(
     channel: Channel,
+    number: Int,
+    channels: List<Channel>,
     nextChannel: Channel?,
     hasPrevious: Boolean,
+    previousChannel: Channel?,
+    onRecall: () -> Unit,
+    onPick: (Channel) -> Unit,
+    onJumpTo: (Int) -> Boolean,
+    nameOf: (Int) -> String?,
+    onHealth: (Boolean) -> Unit,
     onBack: () -> Unit,
     onPrevious: () -> Unit,
     onNext: () -> Unit
@@ -684,9 +1012,11 @@ private fun PlayerScreen(
     var flashNonce by remember(channel.url) { mutableStateOf(0) }
     var noticeText by remember(channel.url) { mutableStateOf("") }
     var noticeVisible by remember(channel.url) { mutableStateOf(false) }
+    var panelOpen by remember(channel.url) { mutableStateOf(false) }
+    var numberBuffer by remember(channel.url) { mutableStateOf("") }
 
     val behind = (behindBase + (if (pausedAt > 0L) (tick - pausedAt).coerceAtLeast(0L) else 0L)).coerceIn(0L, dvrCap)
-    val overlayFocus = status == PlayStatus.FAILED || resumePrompt
+    val overlayFocus = status == PlayStatus.FAILED || resumePrompt || panelOpen
     val showControls = controlsVisible && !overlayFocus
 
     fun nowMs(): Long = SystemClock.elapsedRealtime()
@@ -761,6 +1091,33 @@ private fun PlayerScreen(
             retryNonce += 1
         } else {
             status = PlayStatus.FAILED
+        }
+    }
+
+    fun commitNumber() {
+        val n = numberBuffer.toIntOrNull()
+        numberBuffer = ""
+        if (n != null && n > 0) {
+            if (!onJumpTo(n)) {
+                noticeText = "Channel $n not found"
+                noticeVisible = true
+            }
+        }
+    }
+
+    BackHandler(enabled = panelOpen) { panelOpen = false }
+
+    // Remember which channels play and which fail (red dot on the channel card).
+    LaunchedEffect(status) {
+        if (status == PlayStatus.PLAYING) onHealth(true)
+        else if (status == PlayStatus.FAILED) onHealth(false)
+    }
+
+    // Typed channel number: jump after a short pause (or immediately on OK).
+    LaunchedEffect(numberBuffer) {
+        if (numberBuffer.isNotEmpty()) {
+            delay(1_600)
+            commitNumber()
         }
     }
 
@@ -907,6 +1264,17 @@ private fun PlayerScreen(
             .onPreviewKeyEvent { event ->
                 if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
                 interaction += 1
+                val digit = digitOf(event.key)
+                if (digit != null && !overlayFocus) {
+                    numberBuffer = (numberBuffer + digit).takeLast(4)
+                    return@onPreviewKeyEvent true
+                }
+                if (numberBuffer.isNotEmpty() &&
+                    (event.key == Key.DirectionCenter || event.key == Key.Enter || event.key == Key.NumPadEnter)
+                ) {
+                    commitNumber()
+                    return@onPreviewKeyEvent true
+                }
                 when (event.key) {
                     Key.ChannelUp, Key.MediaNext -> { if (nextChannel != null) onNext(); true }
                     Key.ChannelDown, Key.MediaPrevious -> { if (hasPrevious) onPrevious(); true }
@@ -981,9 +1349,13 @@ private fun PlayerScreen(
         PlayerControls(
             visible = showControls,
             channel = channel,
+            number = number,
             paused = paused,
             hasPrevious = hasPrevious,
             hasNext = nextChannel != null,
+            hasRecall = previousChannel != null,
+            onOpenList = { panelOpen = true },
+            onRecall = onRecall,
             behindMs = behind,
             availableMs = (behind + pos).coerceAtMost(dvrCap),
             capMs = dvrCap,
@@ -1000,6 +1372,16 @@ private fun PlayerScreen(
             },
             onGoLive = { goLive() }
         )
+
+        ChannelPanel(
+            visible = panelOpen,
+            channels = channels,
+            currentId = channel.id,
+            onPick = { panelOpen = false; onPick(it) },
+            onClose = { panelOpen = false }
+        )
+
+        NumberOverlay(numberBuffer, nameOf(numberBuffer.toIntOrNull() ?: 0))
 
         ResumePrompt(
             visible = resumePrompt,
@@ -1139,9 +1521,11 @@ private fun ResumePrompt(
 private fun PlayerControls(
     visible: Boolean,
     channel: Channel,
+    number: Int,
     paused: Boolean,
     hasPrevious: Boolean,
     hasNext: Boolean,
+    hasRecall: Boolean,
     behindMs: Long,
     availableMs: Long,
     capMs: Long,
@@ -1151,9 +1535,22 @@ private fun PlayerControls(
     onNext: () -> Unit,
     onToggle: () -> Unit,
     onSeekBy: (Long) -> Unit,
-    onGoLive: () -> Unit
+    onGoLive: () -> Unit,
+    onOpenList: () -> Unit,
+    onRecall: () -> Unit
 ) {
     val atLive = behindMs <= LIVE_EDGE_MS
+    // The time bar is only needed when paused or behind live - otherwise keep the screen clean.
+    val barVisible = paused || !atLive
+    var barFocused by remember { mutableStateOf(false) }
+    LaunchedEffect(barVisible) {
+        if (!barVisible && barFocused) {
+            try {
+                playFocus.requestFocus()
+            } catch (_: Throwable) {
+            }
+        }
+    }
     AnimatedVisibility(
         visible = visible,
         modifier = Modifier.fillMaxSize().zIndex(8f),
@@ -1169,7 +1566,7 @@ private fun PlayerControls(
                     .padding(horizontal = 28.dp, vertical = 18.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                BackPill(channel.name, onBack)
+                BackPill(if (number > 0) "$number  ${channel.name}" else channel.name, onBack)
                 Spacer(Modifier.weight(1f))
                 Row(
                     Modifier
@@ -1196,12 +1593,25 @@ private fun PlayerControls(
                     .padding(start = 40.dp, end = 40.dp, top = 40.dp, bottom = 24.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                DvrBar(behindMs, availableMs, capMs, onSeekBy, Modifier.fillMaxWidth())
-                Spacer(Modifier.height(10.dp))
+                AnimatedVisibility(
+                    visible = barVisible,
+                    enter = fadeIn(tween(200)) + expandVertically(),
+                    exit = fadeOut(tween(200)) + shrinkVertically()
+                ) {
+                    Column {
+                        DvrBar(
+                            behindMs, availableMs, capMs, onSeekBy,
+                            Modifier.fillMaxWidth(),
+                            onFocusChange = { barFocused = it }
+                        )
+                        Spacer(Modifier.height(10.dp))
+                    }
+                }
                 Row(
-                    horizontalArrangement = Arrangement.spacedBy(22.dp, Alignment.CenterHorizontally),
+                    horizontalArrangement = Arrangement.spacedBy(20.dp, Alignment.CenterHorizontally),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
+                    ControlButton(Icons.Default.List, "Channel list", 52.dp, onClick = onOpenList)
                     if (hasPrevious) ControlButton(Icons.Default.SkipPrevious, "Previous channel", 52.dp, onClick = onPrevious)
                     ControlButton(Icons.Default.Replay10, "Back 10 seconds", 52.dp, onClick = { onSeekBy(-SEEK_STEP_MS) })
                     ControlButton(
@@ -1213,8 +1623,140 @@ private fun PlayerControls(
                     )
                     ControlButton(Icons.Default.Forward10, "Forward 10 seconds", 52.dp, onClick = { onSeekBy(SEEK_STEP_MS) })
                     if (hasNext) ControlButton(Icons.Default.SkipNext, "Next channel", 52.dp, onClick = onNext)
+                    if (hasRecall) ControlButton(Icons.Default.SwapHoriz, "Last channel", 52.dp, onClick = onRecall)
                     LivePill(atLive, onGoLive)
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun NumberOverlay(text: String, name: String?) {
+    AnimatedVisibility(
+        visible = text.isNotEmpty(),
+        modifier = Modifier.fillMaxSize().zIndex(9f),
+        enter = fadeIn(tween(120)),
+        exit = fadeOut(tween(200))
+    ) {
+        Box(Modifier.fillMaxSize().padding(28.dp), contentAlignment = Alignment.TopEnd) {
+            Surface(
+                shape = RoundedCornerShape(18.dp),
+                color = Color(0xE6141826),
+                border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF343B4E))
+            ) {
+                Column(Modifier.padding(horizontal = 22.dp, vertical = 14.dp), horizontalAlignment = Alignment.End) {
+                    Text(text, color = Color.White, fontSize = 44.sp, fontWeight = FontWeight.ExtraBold)
+                    Text(
+                        name ?: "No such channel",
+                        color = if (name != null) Color(0xFFB982FF) else Color(0xFFFF8A80),
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** Slide-in list of all channels, so you can switch without going back to Home. */
+@Composable
+private fun ChannelPanel(
+    visible: Boolean,
+    channels: List<Channel>,
+    currentId: String,
+    onPick: (Channel) -> Unit,
+    onClose: () -> Unit
+) {
+    AnimatedVisibility(
+        visible = visible,
+        modifier = Modifier.fillMaxSize().zIndex(7f),
+        enter = slideInHorizontally(initialOffsetX = { it }) + fadeIn(tween(200)),
+        exit = slideOutHorizontally(targetOffsetX = { it }) + fadeOut(tween(200))
+    ) {
+        val currentIndex = channels.indexOfFirst { it.id == currentId }.coerceAtLeast(0)
+        val listState = rememberLazyListState(initialFirstVisibleItemIndex = (currentIndex - 3).coerceAtLeast(0))
+        val focus = remember { FocusRequester() }
+        LaunchedEffect(Unit) {
+            delay(150)
+            try {
+                focus.requestFocus()
+            } catch (_: Throwable) {
+            }
+        }
+        Box(Modifier.fillMaxSize()) {
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .background(Color(0x66000000))
+                    .pointerInput(Unit) { detectTapGestures(onTap = { onClose() }) }
+            )
+            Column(
+                Modifier
+                    .align(Alignment.CenterEnd)
+                    .width(340.dp)
+                    .fillMaxHeight()
+                    .background(Color(0xF2101420))
+                    .padding(top = 18.dp)
+            ) {
+                Row(Modifier.padding(horizontal = 20.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.List, null, tint = Color(0xFFB982FF), modifier = Modifier.size(22.dp))
+                    Spacer(Modifier.width(10.dp))
+                    Text("Channels", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.ExtraBold)
+                    Spacer(Modifier.weight(1f))
+                    Text("${channels.size}", color = Color(0xFF9FA7B8), fontSize = 13.sp)
+                }
+                LazyColumn(state = listState, modifier = Modifier.weight(1f)) {
+                    itemsIndexed(channels, key = { _, c -> c.id }) { index, c ->
+                        PanelRow(
+                            number = index + 1,
+                            channel = c,
+                            current = c.id == currentId,
+                            modifier = if (c.id == currentId) Modifier.focusRequester(focus) else Modifier,
+                            onClick = { onPick(c) }
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PanelRow(number: Int, channel: Channel, current: Boolean, modifier: Modifier, onClick: () -> Unit) {
+    var focused by remember { mutableStateOf(false) }
+    Surface(
+        onClick = onClick,
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 10.dp, vertical = 3.dp)
+            .onFocusChanged { focused = it.hasFocus },
+        shape = RoundedCornerShape(12.dp),
+        color = when {
+            focused -> Color(0xFF2B1850)
+            current -> Color(0x331D1634)
+            else -> Color.Transparent
+        },
+        border = androidx.compose.foundation.BorderStroke(
+            if (focused) 2.dp else 0.dp,
+            if (focused) Color(0xFFB36BFF) else Color.Transparent
+        )
+    ) {
+        Row(Modifier.padding(horizontal = 12.dp, vertical = 9.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text("$number", color = Color(0xFF8D94A5), fontSize = 12.sp, modifier = Modifier.width(36.dp))
+            ChannelLogo(channel, Modifier.size(30.dp))
+            Spacer(Modifier.width(12.dp))
+            Text(
+                channel.name,
+                color = Color.White,
+                fontSize = 15.sp,
+                fontWeight = if (current) FontWeight.ExtraBold else FontWeight.Medium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
+            )
+            if (current) {
+                Box(Modifier.size(8.dp).clip(CircleShape).background(Color(0xFFB66CFF)))
             }
         }
     }
@@ -1227,7 +1769,8 @@ private fun DvrBar(
     availableMs: Long,
     capMs: Long,
     onSeekBy: (Long) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    onFocusChange: (Boolean) -> Unit = {}
 ) {
     var focused by remember { mutableStateOf(false) }
     val behindState by rememberUpdatedState(behindMs)
@@ -1245,7 +1788,10 @@ private fun DvrBar(
             Modifier
                 .weight(1f)
                 .height(40.dp)
-                .onFocusChanged { focused = it.hasFocus }
+                .onFocusChanged {
+                    focused = it.hasFocus
+                    onFocusChange(it.hasFocus)
+                }
                 .onKeyEvent { event ->
                     if (event.key == Key.DirectionLeft || event.key == Key.DirectionRight) {
                         if (event.type == KeyEventType.KeyDown) {
@@ -1595,82 +2141,25 @@ private fun FailedPanel(
 }
 
 @Composable
-private fun AboutScreen(onBack: () -> Unit, channelCount: Int) {
-    val context = LocalContext.current
-    val lastSync = remember { PlaylistRepository.lastSync(context) }
-    val syncText = if (lastSync > 0L) DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT).format(Date(lastSync)) else "Not updated yet"
-    val scroll = rememberScrollState()
-    val scope = rememberCoroutineScope()
-    val backFocus = remember { FocusRequester() }
-    LaunchedEffect(Unit) {
-        try {
-            backFocus.requestFocus()
-        } catch (_: Throwable) {
-        }
+internal fun Logo(modifier: Modifier = Modifier) {
+    if (BrandConfig.REMOTE_LOGO_URL.isNotBlank()) {
+        // Logo from a link; falls back to the built-in logo while loading or on error.
+        AsyncImage(
+            model = BrandConfig.REMOTE_LOGO_URL,
+            contentDescription = BrandConfig.APP_NAME,
+            placeholder = painterResource(R.drawable.app_logo),
+            error = painterResource(R.drawable.app_logo),
+            contentScale = ContentScale.Fit,
+            modifier = modifier.clip(RoundedCornerShape(18.dp))
+        )
+    } else {
+        Image(
+            painter = painterResource(R.drawable.app_logo),
+            contentDescription = BrandConfig.APP_NAME,
+            contentScale = ContentScale.Fit,
+            modifier = modifier.clip(RoundedCornerShape(18.dp))
+        )
     }
-
-    Box(
-        Modifier
-            .fillMaxSize()
-            .background(Brush.verticalGradient(listOf(Color(0xFF130B24), Color(0xFF07090E))))
-            .onPreviewKeyEvent { event ->
-                // D-pad Up / Down scrolls the page; OK on the Back button goes back.
-                if (event.type == KeyEventType.KeyDown) {
-                    when (event.key) {
-                        Key.DirectionDown -> { scope.launch { scroll.animateScrollBy(280f) }; true }
-                        Key.DirectionUp -> { scope.launch { scroll.animateScrollBy(-280f) }; true }
-                        else -> false
-                    }
-                } else false
-            }
-    ) {
-        Column(Modifier.fillMaxSize().padding(horizontal = 44.dp, vertical = 30.dp)) {
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                HeaderButton(Icons.Default.ArrowBack, "Back", onBack, backFocus)
-                Spacer(Modifier.width(20.dp))
-                Text("About", color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.ExtraBold)
-            }
-            Column(
-                Modifier.weight(1f).fillMaxWidth().verticalScroll(scroll).padding(top = 24.dp, bottom = 24.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                Logo(Modifier.size(100.dp))
-                Spacer(Modifier.height(16.dp))
-                Text(BrandConfig.APP_NAME, color = Color.White, fontSize = 32.sp, fontWeight = FontWeight.ExtraBold)
-                Text("Premium Live TV", color = Color(0xFFB982FF), fontSize = 15.sp, fontWeight = FontWeight.Bold)
-                Spacer(Modifier.height(30.dp))
-                AboutCard("APK Details", listOf("App: ${BrandConfig.APP_NAME}", "Version: 1.0.0", "Total Live Channels: $channelCount", "Last Update: $syncText"))
-                Spacer(Modifier.height(18.dp))
-                AboutCard("Developer Details", listOf("Developer: Hasan Ahmed", "App: ${BrandConfig.APP_NAME}"))
-            }
-        }
-    }
-}
-
-@Composable
-private fun AboutCard(title: String, lines: List<String>) {
-    Surface(
-        modifier = Modifier.fillMaxWidth(0.72f),
-        shape = RoundedCornerShape(22.dp),
-        color = Color(0xFF121622),
-        border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF343B4E))
-    ) {
-        Column(Modifier.padding(24.dp)) {
-            Text(title, color = Color(0xFFC58CFF), fontSize = 19.sp, fontWeight = FontWeight.ExtraBold)
-            Spacer(Modifier.height(12.dp))
-            lines.forEach { Text(it, color = Color(0xFFE6E8EE), fontSize = 15.sp, modifier = Modifier.padding(vertical = 3.dp)) }
-        }
-    }
-}
-
-@Composable
-private fun Logo(modifier: Modifier = Modifier) {
-    Image(
-        painter = painterResource(R.drawable.app_logo),
-        contentDescription = BrandConfig.APP_NAME,
-        contentScale = ContentScale.Fit,
-        modifier = modifier.clip(RoundedCornerShape(18.dp))
-    )
 }
 
 @Composable

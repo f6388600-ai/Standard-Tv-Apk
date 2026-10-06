@@ -25,13 +25,20 @@ object PlaylistRepository {
     fun lastSync(context: Context): Long =
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getLong(KEY_SYNC, 0L)
 
-    suspend fun load(context: Context): List<Channel> = withContext(Dispatchers.IO) {
+    data class LoadResult(val channels: List<Channel>, val fresh: Boolean)
+
+    suspend fun load(context: Context): List<Channel> = loadInternal(context, false).channels
+
+    /** Manual refresh: always goes to the network. `fresh` tells if new data was really fetched. */
+    suspend fun refresh(context: Context): LoadResult = loadInternal(context, true)
+
+    private suspend fun loadInternal(context: Context, force: Boolean): LoadResult = withContext(Dispatchers.IO) {
         val cached = readCache(context)
         val lastSync = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .getLong(KEY_SYNC, 0L)
 
-        if (cached.isNotEmpty() && System.currentTimeMillis() - lastSync < BrandConfig.REFRESH_INTERVAL_MS) {
-            return@withContext cached
+        if (!force && cached.isNotEmpty() && System.currentTimeMillis() - lastSync < BrandConfig.REFRESH_INTERVAL_MS) {
+            return@withContext LoadResult(cached, false)
         }
 
         try {
@@ -47,18 +54,18 @@ object PlaylistRepository {
                     }
                 }.awaitAll().filterNotNull()
             }
-            // If one playlist could not be downloaded, keep the last full list instead of a partial one.
+            // If one source could not be downloaded, keep the last full list instead of a partial one.
             if (texts.isEmpty() || (texts.size < urls.size && cached.isNotEmpty())) {
-                return@withContext cached
+                return@withContext LoadResult(cached, false)
             }
             val parsed = parseAndSelectLive(texts)
             if (parsed.isNotEmpty()) {
                 saveCache(context, parsed)
-                return@withContext parsed
+                return@withContext LoadResult(parsed, true)
             }
-            cached
+            LoadResult(cached, false)
         } catch (_: Exception) {
-            cached
+            LoadResult(cached, false)
         }
     }
 
