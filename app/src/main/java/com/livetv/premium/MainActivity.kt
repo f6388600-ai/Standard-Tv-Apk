@@ -1,3 +1,5 @@
+import androidx.activity.OnBackPressedCallback
+
 package com.livetv.premium
 
 import android.app.Activity
@@ -46,7 +48,7 @@ import coil3.compose.AsyncImage
 import kotlinx.coroutines.launch
 import java.util.Locale
 
-class MainActivity : ComponentActivity() {
+class MainActivity : ComponentActivity() {\n    private fun runOnBackPressed(action: () -> Unit) {\n        onBackPressedDispatcher.addCallback(this, object : androidx.activity.OnBackPressedCallback(true) {\n            override fun handleOnBackPressed() {\n                remove()\n                action()\n            }\n        })\n    }\n
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent { LiveTvApp() }
