@@ -29,6 +29,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
+import androidx.compose.ui.zIndex
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -46,6 +47,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
@@ -373,7 +377,9 @@ private fun ChannelCard(channel: Channel, onClick: (Channel) -> Unit, weight: Mo
 @Composable
 private fun PlayerScreen(channel: Channel, onBack: () -> Unit, onPrevious: () -> Unit, onNext: () -> Unit) {
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     var retryCount by remember(channel.url) { mutableStateOf(0) }
+    var showBackButton by remember { mutableStateOf(false) }
     val player = remember(channel.url) {
         ExoPlayer.Builder(context).build().apply {
             val itemBuilder = MediaItem.Builder().setUri(channel.url)
@@ -384,7 +390,14 @@ private fun PlayerScreen(channel: Channel, onBack: () -> Unit, onPrevious: () ->
         }
     }
 
-    DisposableEffect(player) {
+    DisposableEffect(player, lifecycleOwner) {
+        val lifecycleObserver = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_STOP) {
+                player.pause()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(lifecycleObserver)
+
         val listener = object : Player.Listener {
             override fun onPlayerError(error: PlaybackException) {
                 if (retryCount < 2) {
@@ -396,6 +409,7 @@ private fun PlayerScreen(channel: Channel, onBack: () -> Unit, onPrevious: () ->
         }
         player.addListener(listener)
         onDispose {
+            lifecycleOwner.lifecycle.removeObserver(lifecycleObserver)
             player.removeListener(listener)
             player.release()
         }
@@ -409,6 +423,9 @@ private fun PlayerScreen(channel: Channel, onBack: () -> Unit, onPrevious: () ->
                     controllerAutoShow = true
                     controllerHideOnTouch = true
                     setPlayer(player)
+                    setControllerVisibilityListener { visibility ->
+                        showBackButton = visibility == android.view.View.VISIBLE
+                    }
                     requestFocus()
                 }
             },
@@ -422,16 +439,38 @@ private fun PlayerScreen(channel: Channel, onBack: () -> Unit, onPrevious: () ->
             }
         )
 
-        Surface(
-            onClick = onBack,
-            modifier = Modifier.padding(24.dp).align(Alignment.TopStart),
-            shape = RoundedCornerShape(14.dp),
-            color = Color(0xDD080A10)
-        ) {
-            Row(Modifier.padding(horizontal = 15.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Default.ArrowBack, "Back", tint = Color.White, modifier = Modifier.size(24.dp))
-                Spacer(Modifier.width(9.dp))
-                Text(channel.name, color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+        if (showBackButton) {
+            Surface(
+                onClick = onBack,
+                modifier = Modifier
+                    .padding(14.dp)
+                    .align(Alignment.TopStart)
+                    .zIndex(10f)
+                    .focusable(),
+                shape = RoundedCornerShape(10.dp),
+                color = Color(0xE6080A10),
+                tonalElevation = 2.dp
+            ) {
+                Row(
+                    Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        Icons.Default.ArrowBack,
+                        "Back",
+                        tint = Color.White,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        channel.name,
+                        color = Color.White,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
             }
         }
     }
