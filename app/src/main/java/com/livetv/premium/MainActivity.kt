@@ -4,6 +4,22 @@ import android.app.Activity
 import android.content.Context
 import android.os.Bundle
 import android.util.Log
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import java.io.File
 import androidx.compose.foundation.Image
 import androidx.activity.compose.BackHandler
@@ -104,6 +120,11 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onStop() {
+        super.onStop()
+        PlayerPreloader.release()
+    }
+
     private fun crashFile() = File(filesDir, "last_crash.txt")
 
     private fun installCrashLogger() {
@@ -199,8 +220,10 @@ private fun LiveTvApp() {
             label = "screen"
         ) { channel ->
             if (channel != null) {
+                val currentIndex = channels.indexOfFirst { it.id == channel.id }
                 PlayerScreen(
                     channel = channel,
+                    nextChannel = if (currentIndex >= 0) channels.getOrNull(currentIndex + 1) else null,
                     onBack = { selected = null },
                     onPrevious = {
                         val index = channels.indexOfFirst { it.id == channel.id }
@@ -391,8 +414,21 @@ private fun ChannelRow(row: List<Channel>, onChannel: (Channel) -> Unit, rowInde
 private fun ChannelCard(channel: Channel, onClick: (Channel) -> Unit, weight: Modifier, position: Int) {
     var focused by remember { mutableStateOf(false) }
     val scale by animateFloatAsState(if (focused) 1.035f else 1f, tween(130), label = "focusScale")
+    val context = LocalContext.current
+    val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
+    // Pre-buffer the stream while the card is focused (TV) or pressed (touch).
+    LaunchedEffect(focused, pressed) {
+        if (pressed) {
+            PlayerPreloader.preload(context, channel)
+        } else if (focused) {
+            delay(350)
+            PlayerPreloader.preload(context, channel)
+        }
+    }
     Surface(
         onClick = { onClick(channel) },
+        interactionSource = interaction,
         modifier = weight
             .scale(scale)
             .height(148.dp)
@@ -415,23 +451,7 @@ private fun ChannelCard(channel: Channel, onClick: (Channel) -> Unit, weight: Mo
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center
         ) {
-            if (channel.logo.isBlank()) {
-                Image(
-                    painter = painterResource(R.drawable.app_logo),
-                    contentDescription = channel.name,
-                    contentScale = ContentScale.Fit,
-                    modifier = Modifier.height(88.dp).fillMaxWidth(0.78f)
-                )
-            } else {
-                AsyncImage(
-                    model = channel.logo,
-                    contentDescription = channel.name,
-                    placeholder = painterResource(R.drawable.app_logo),
-                    error = painterResource(R.drawable.app_logo),
-                    contentScale = ContentScale.Fit,
-                    modifier = Modifier.height(88.dp).fillMaxWidth(0.78f)
-                )
-            }
+            ChannelLogo(channel, Modifier.height(88.dp).fillMaxWidth(0.78f))
             Spacer(Modifier.height(7.dp))
             Text(
                 channel.name,
@@ -447,19 +467,97 @@ private fun ChannelCard(channel: Channel, onClick: (Channel) -> Unit, weight: Mo
     }
 }
 
+private enum class PlayStatus { LOADING, PLAYING, REBUFFERING, RETRYING, FAILED }
+
+private const val MAX_RETRIES = 3
+private const val LOAD_TIMEOUT_MS = 15_000L
+
+private fun friendlyError(e: PlaybackException): String = when (e.errorCode) {
+    PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
+    PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT -> "Network problem. Check your internet connection."
+    PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS,
+    PlaybackException.ERROR_CODE_IO_FILE_NOT_FOUND -> "This channel is offline right now."
+    PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED,
+    PlaybackException.ERROR_CODE_PARSING_MANIFEST_MALFORMED -> "This stream format is not supported."
+    PlaybackException.ERROR_CODE_DECODER_INIT_FAILED,
+    PlaybackException.ERROR_CODE_DECODING_FAILED -> "Your device could not decode this stream."
+    else -> "Playback error (${e.errorCodeName})"
+}
+
 @Composable
-private fun PlayerScreen(channel: Channel, onBack: () -> Unit, onPrevious: () -> Unit, onNext: () -> Unit) {
+private fun PlayerScreen(
+    channel: Channel,
+    nextChannel: Channel?,
+    onBack: () -> Unit,
+    onPrevious: () -> Unit,
+    onNext: () -> Unit
+) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
-    var retryCount by remember(channel.url) { mutableStateOf(0) }
     var showBackButton by remember { mutableStateOf(false) }
+
+    // Re-use the pre-buffered player if one is ready for this channel => instant start.
     val player = remember(channel.url) {
-        ExoPlayer.Builder(context).build().apply {
-            val itemBuilder = MediaItem.Builder().setUri(channel.url)
-            if (channel.url.lowercase(Locale.US).contains(".m3u8")) itemBuilder.setMimeType(MimeTypes.APPLICATION_M3U8)
-            setMediaItem(itemBuilder.build())
-            playWhenReady = true
+        val reused = PlayerPreloader.take(channel.url)
+        val p = reused ?: PlayerPreloader.create(context).apply {
+            setMediaItem(PlayerPreloader.mediaItem(channel.url))
             prepare()
+        }
+        if (reused != null && p.playerError != null) {
+            p.setMediaItem(PlayerPreloader.mediaItem(channel.url))
+            p.prepare()
+        }
+        p.playWhenReady = true
+        p
+    }
+
+    var status by remember(channel.url) {
+        mutableStateOf(if (player.playbackState == Player.STATE_READY) PlayStatus.PLAYING else PlayStatus.LOADING)
+    }
+    var attempt by remember(channel.url) { mutableStateOf(0) }
+    var retryNonce by remember(channel.url) { mutableStateOf(0) }
+    var errorText by remember(channel.url) { mutableStateOf("") }
+
+    fun restart() {
+        player.setMediaItem(PlayerPreloader.mediaItem(channel.url))
+        player.prepare()
+        player.playWhenReady = true
+    }
+
+    fun handleFailure(message: String) {
+        errorText = message
+        if (attempt < MAX_RETRIES) {
+            attempt += 1
+            status = PlayStatus.RETRYING
+            retryNonce += 1
+        } else {
+            status = PlayStatus.FAILED
+        }
+    }
+
+    // Auto retry with a growing delay.
+    LaunchedEffect(retryNonce) {
+        if (retryNonce > 0 && status == PlayStatus.RETRYING) {
+            delay(1_200L * attempt)
+            if (status == PlayStatus.RETRYING) restart()
+        }
+    }
+
+    // If a stream never starts, treat it as a failure instead of spinning forever.
+    LaunchedEffect(status, retryNonce) {
+        if (status == PlayStatus.LOADING || status == PlayStatus.RETRYING) {
+            delay(LOAD_TIMEOUT_MS)
+            if (status == PlayStatus.LOADING || status == PlayStatus.RETRYING) {
+                handleFailure("The stream is taking too long to respond.")
+            }
+        }
+    }
+
+    // Warm up the next channel so channel up/down is fast too.
+    LaunchedEffect(channel.url, nextChannel?.url, status) {
+        if (status == PlayStatus.PLAYING && nextChannel != null) {
+            delay(3_000)
+            PlayerPreloader.preload(context, nextChannel)
         }
     }
 
@@ -472,12 +570,22 @@ private fun PlayerScreen(channel: Channel, onBack: () -> Unit, onPrevious: () ->
         lifecycleOwner.lifecycle.addObserver(lifecycleObserver)
 
         val listener = object : Player.Listener {
-            override fun onPlayerError(error: PlaybackException) {
-                if (retryCount < 2) {
-                    retryCount++
-                    player.prepare()
-                    player.playWhenReady = true
+            override fun onPlaybackStateChanged(playbackState: Int) {
+                when (playbackState) {
+                    Player.STATE_READY -> {
+                        status = PlayStatus.PLAYING
+                        attempt = 0
+                    }
+                    Player.STATE_BUFFERING -> {
+                        if (status == PlayStatus.PLAYING) status = PlayStatus.REBUFFERING
+                    }
+                    Player.STATE_ENDED -> handleFailure("The stream ended unexpectedly.")
+                    else -> Unit
                 }
+            }
+
+            override fun onPlayerError(error: PlaybackException) {
+                handleFailure(friendlyError(error))
             }
         }
         player.addListener(listener)
@@ -516,7 +624,24 @@ private fun PlayerScreen(channel: Channel, onBack: () -> Unit, onPrevious: () ->
             }
         )
 
-        if (showBackButton) {
+        PlayerStatusOverlay(
+            channel = channel,
+            status = status,
+            attempt = attempt,
+            errorText = errorText,
+            hasNext = nextChannel != null,
+            onRetry = {
+                attempt = 0
+                errorText = ""
+                status = PlayStatus.LOADING
+                retryNonce += 1
+                restart()
+            },
+            onBack = onBack,
+            onNext = onNext
+        )
+
+        if (showBackButton || status == PlayStatus.LOADING || status == PlayStatus.RETRYING) {
             Surface(
                 onClick = onBack,
                 modifier = Modifier
@@ -548,6 +673,207 @@ private fun PlayerScreen(channel: Channel, onBack: () -> Unit, onPrevious: () ->
                         overflow = TextOverflow.Ellipsis
                     )
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PlayerStatusOverlay(
+    channel: Channel,
+    status: PlayStatus,
+    attempt: Int,
+    errorText: String,
+    hasNext: Boolean,
+    onRetry: () -> Unit,
+    onBack: () -> Unit,
+    onNext: () -> Unit
+) {
+    val busy = status == PlayStatus.LOADING || status == PlayStatus.RETRYING
+
+    AnimatedVisibility(
+        visible = busy,
+        modifier = Modifier.fillMaxSize().zIndex(5f),
+        enter = fadeIn(tween(250)),
+        exit = fadeOut(tween(450))
+    ) {
+        LoadingPanel(channel, status == PlayStatus.RETRYING, attempt, errorText)
+    }
+
+    AnimatedVisibility(
+        visible = status == PlayStatus.REBUFFERING,
+        modifier = Modifier.fillMaxSize().zIndex(5f),
+        enter = fadeIn(tween(200)),
+        exit = fadeOut(tween(300))
+    ) {
+        Box(Modifier.fillMaxSize().padding(18.dp), contentAlignment = Alignment.TopEnd) {
+            Row(
+                Modifier
+                    .clip(RoundedCornerShape(20.dp))
+                    .background(Color(0xCC080A10))
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(16.dp),
+                    strokeWidth = 2.dp,
+                    color = Color(0xFFB66CFF)
+                )
+                Spacer(Modifier.width(8.dp))
+                Text("Buffering…", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+            }
+        }
+    }
+
+    AnimatedVisibility(
+        visible = status == PlayStatus.FAILED,
+        modifier = Modifier.fillMaxSize().zIndex(6f),
+        enter = fadeIn(tween(300)) + scaleIn(initialScale = 0.92f),
+        exit = fadeOut(tween(250))
+    ) {
+        FailedPanel(errorText, hasNext, onRetry, onBack, onNext)
+    }
+}
+
+@Composable
+private fun ChannelLogo(channel: Channel, modifier: Modifier) {
+    if (channel.logo.isBlank()) {
+        Image(
+            painter = painterResource(R.drawable.app_logo),
+            contentDescription = channel.name,
+            contentScale = ContentScale.Fit,
+            modifier = modifier
+        )
+    } else {
+        AsyncImage(
+            model = channel.logo,
+            contentDescription = channel.name,
+            placeholder = painterResource(R.drawable.app_logo),
+            error = painterResource(R.drawable.app_logo),
+            contentScale = ContentScale.Fit,
+            modifier = modifier
+        )
+    }
+}
+
+@Composable
+private fun LoadingPanel(channel: Channel, retrying: Boolean, attempt: Int, detail: String) {
+    val transition = rememberInfiniteTransition(label = "loading")
+    val angle by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 360f,
+        animationSpec = infiniteRepeatable(tween(1100, easing = LinearEasing)),
+        label = "angle"
+    )
+    val pulse by transition.animateFloat(
+        initialValue = 0.94f,
+        targetValue = 1.06f,
+        animationSpec = infiniteRepeatable(tween(900), RepeatMode.Reverse),
+        label = "pulse"
+    )
+
+    Box(
+        Modifier
+            .fillMaxSize()
+            .background(Brush.radialGradient(listOf(Color(0xFF230F42), Color(0xFF05060A)))),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Box(Modifier.size(150.dp), contentAlignment = Alignment.Center) {
+                Canvas(Modifier.fillMaxSize()) {
+                    val stroke = 5.dp.toPx()
+                    val arcSize = Size(size.width - stroke, size.height - stroke)
+                    val topLeft = Offset(stroke / 2f, stroke / 2f)
+                    drawArc(
+                        color = Color(0xFFB66CFF),
+                        startAngle = angle,
+                        sweepAngle = 110f,
+                        useCenter = false,
+                        topLeft = topLeft,
+                        size = arcSize,
+                        style = Stroke(stroke, cap = StrokeCap.Round)
+                    )
+                    drawArc(
+                        color = Color(0x666C5CFF),
+                        startAngle = angle + 180f,
+                        sweepAngle = 70f,
+                        useCenter = false,
+                        topLeft = topLeft,
+                        size = arcSize,
+                        style = Stroke(stroke, cap = StrokeCap.Round)
+                    )
+                }
+                ChannelLogo(
+                    channel,
+                    Modifier.size(84.dp).scale(pulse).clip(RoundedCornerShape(14.dp))
+                )
+            }
+            Spacer(Modifier.height(22.dp))
+            Text(
+                channel.name,
+                color = Color.White,
+                fontSize = 22.sp,
+                fontWeight = FontWeight.ExtraBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Spacer(Modifier.height(6.dp))
+            Text(
+                if (retrying) "Reconnecting… attempt $attempt of $MAX_RETRIES" else "Loading stream…",
+                color = Color(0xFFB982FF),
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Bold
+            )
+            if (retrying && detail.isNotBlank()) {
+                Spacer(Modifier.height(4.dp))
+                Text(detail, color = Color(0xFF9FA7B8), fontSize = 12.sp, textAlign = TextAlign.Center)
+            }
+            Spacer(Modifier.height(18.dp))
+            LinearProgressIndicator(
+                modifier = Modifier.width(200.dp).height(3.dp).clip(RoundedCornerShape(2.dp)),
+                color = Color(0xFFB66CFF),
+                trackColor = Color(0x334A3A63)
+            )
+        }
+    }
+}
+
+@Composable
+private fun FailedPanel(
+    message: String,
+    hasNext: Boolean,
+    onRetry: () -> Unit,
+    onBack: () -> Unit,
+    onNext: () -> Unit
+) {
+    val focus = remember { FocusRequester() }
+    LaunchedEffect(Unit) {
+        try {
+            focus.requestFocus()
+        } catch (_: Throwable) {
+        }
+    }
+    Box(
+        Modifier.fillMaxSize().background(Color(0xF205060A)),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(32.dp)) {
+            Icon(Icons.Default.ErrorOutline, null, tint = Color(0xFFFF8A80), modifier = Modifier.size(56.dp))
+            Spacer(Modifier.height(14.dp))
+            Text("Stream unavailable", color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.ExtraBold)
+            Spacer(Modifier.height(6.dp))
+            Text(message, color = Color(0xFFC4CAD6), fontSize = 14.sp, textAlign = TextAlign.Center)
+            Spacer(Modifier.height(22.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Button(onClick = onRetry, modifier = Modifier.focusRequester(focus)) {
+                    Icon(Icons.Default.Refresh, null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("Retry")
+                }
+                if (hasNext) {
+                    OutlinedButton(onClick = onNext) { Text("Next channel") }
+                }
+                OutlinedButton(onClick = onBack) { Text("Back") }
             }
         }
     }
